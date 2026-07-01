@@ -28,46 +28,35 @@ def _headers():
 
 
 def get_previous_week_sunday() -> date:
-    """Script runs on Monday — yesterday was Sunday."""
     today = datetime.now(IRELAND_TZ).date()
     return today - timedelta(days=1)
 
 
 def _get_week_range() -> tuple:
-    """Return (monday_start_iso, sunday_end_iso) in Ireland time."""
     prev_sunday = get_previous_week_sunday()
     prev_monday = prev_sunday - timedelta(days=6)
-
     monday_dt = IRELAND_TZ.localize(datetime(prev_monday.year, prev_monday.month, prev_monday.day, 0, 0, 0))
     sunday_dt  = IRELAND_TZ.localize(datetime(prev_sunday.year,  prev_sunday.month,  prev_sunday.day,  23, 59, 59))
-
     return monday_dt.isoformat(), sunday_dt.isoformat()
 
 
-def _get_team_members() -> dict:
-    """Return {team_member_id: display_name} for all active staff."""
-    members = {}
-    cursor = None
-
-    while True:
-        params = {'limit': 200, 'status': 'ACTIVE'}
-        if cursor:
-            params['cursor'] = cursor
-
-        r = requests.get(f'{SQUARE_BASE}/team-members', headers=_headers(), params=params)
-        r.raise_for_status()
-        data = r.json()
-
-        for m in data.get('team_members', []):
-            name = m.get('display_name') or f"{m.get('given_name', '')} {m.get('family_name', '')}".strip()
-            members[m['id']] = name
-
-        cursor = data.get('cursor')
-        if not cursor:
-            break
-
-    log.info(f"Loaded {len(members)} team members from Square")
-    return members
+def _get_team_member_name(member_id: str) -> str:
+    """
+    Fetch a single team member's name by ID.
+    Falls back to the member ID string if the API call fails.
+    """
+    try:
+        r = requests.get(
+            f'{SQUARE_BASE}/team-members/{member_id}',
+            headers=_headers(),
+            timeout=10,
+        )
+        if r.status_code == 200:
+            m = r.json().get('team_member', {})
+            return m.get('display_name') or f"{m.get('given_name','').strip()} {m.get('family_name','').strip()}".strip() or member_id
+    except Exception as e:
+        log.warning(f"Could not fetch team member {member_id}: {e}")
+    return member_id
 
 
 def get_shifts_for_week() -> dict:
@@ -86,15 +75,15 @@ def get_shifts_for_week() -> dict:
     start_at, end_at = _get_week_range()
     log.info(f"Fetching shifts from {start_at} to {end_at}")
 
-    team_members = _get_team_members()
-    location_ids = [lid for lid in LOCATION_MAP.values() if lid]
+    location_ids    = [lid for lid in LOCATION_MAP.values() if lid]
+    location_reverse = {v: k for k, v in LOCATION_MAP.items() if v}
 
     if not location_ids:
-        raise ValueError("No Square location IDs configured. Set SQUARE_LOC_* env vars.")
+        raise ValueError("No Square location IDs configured.")
 
-    location_reverse = {v: k for k, v in LOCATION_MAP.items() if v}
-    results = {sheet: {} for sheet in LOCATION_MAP}
-    cursor = None
+    results    = {sheet: {} for sheet in LOCATION_MAP}
+    name_cache = {}   # member_id -> display name
+    cursor     = None
 
     while True:
         body = {
@@ -118,8 +107,12 @@ def get_shifts_for_week() -> dict:
             if not sheet_name:
                 continue
 
-            member_id = shift.get('team_member_id')
-            name      = team_members.get(member_id, f'Unknown ({member_id})')
+            member_id = shift.get('team_member_id', '')
+
+            # Cache name lookups so we only call the API once per person
+            if member_id not in name_cache:
+                name_cache[member_id] = _get_team_member_name(member_id)
+            name = name_cache[member_id]
 
             start_str = shift.get('start_at')
             end_str   = shift.get('end_at')
@@ -133,7 +126,7 @@ def get_shifts_for_week() -> dict:
             if name not in results[sheet_name]:
                 results[sheet_name][name] = {'weekday_hours': 0.0, 'sunday_hours': 0.0}
 
-            if shift_start.weekday() == 6:  # Sunday = 6
+            if shift_start.weekday() == 6:
                 results[sheet_name][name]['sunday_hours']  += hours
             else:
                 results[sheet_name][name]['weekday_hours'] += hours
