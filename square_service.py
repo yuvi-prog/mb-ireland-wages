@@ -156,6 +156,7 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
 def get_income_for_week(target_sunday_override=None) -> dict:
     """
     For each location, calculate: Totals Collected - Gift Vouchers Redeemed.
+    Uses GET /v2/payments with query params (correct Square endpoint).
     Returns {sheet_name: income_float} in EUR.
     """
     week_monday, week_sunday = _get_week_range(target_sunday_override)
@@ -174,25 +175,16 @@ def get_income_for_week(target_sunday_override=None) -> dict:
         cursor = None
 
         while True:
-            body = {
-                'query': {
-                    'filter': {
-                        'location_ids': [location_id],
-                        'date_time_filter': {
-                            'created_at': {
-                                'start_at': start_at,
-                                'end_at':   end_at,
-                            }
-                        },
-                        'status_filter': {'statuses': ['COMPLETED']},
-                    }
-                },
-                'limit': 500,
+            params = {
+                'location_id': location_id,
+                'begin_time':  start_at,
+                'end_time':    end_at,
+                'limit':       500,
             }
             if cursor:
-                body['cursor'] = cursor
+                params['cursor'] = cursor
 
-            r = requests.post(f'{SQUARE_BASE}/payments/search', headers=_headers(), json=body)
+            r = requests.get(f'{SQUARE_BASE}/payments', headers=_headers(), params=params)
             r.raise_for_status()
             data = r.json()
 
