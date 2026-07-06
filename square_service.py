@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta, date
 
 import pytz
 import requests
@@ -29,33 +29,15 @@ def _headers():
 
 
 def get_previous_week_sunday() -> date:
-    """Yesterday (Sunday) when called on a Melbourne Monday."""
     today = datetime.now(MELBOURNE_TZ).date()
     return today - timedelta(days=1)
 
 
-def _get_week_range(target_sunday=None) -> tuple:
-    """
-    Return (monday_start_utc, sunday_end_utc) as ISO strings for the Square API.
-    Square stores shift times in UTC — we send UTC boundaries covering the
-    full Ireland week (Mon 00:00 to Sun 23:59 Ireland time).
-    """
+def _get_week_range(target_sunday=None):
+    """Return (monday, sunday) as date objects for the target week."""
     prev_sunday = target_sunday or get_previous_week_sunday()
     prev_monday = prev_sunday - timedelta(days=6)
-
-    # Use Ireland midnight as the boundary (shifts are worked in Ireland)
-    monday_ireland = IRELAND_TZ.localize(
-        datetime(prev_monday.year, prev_monday.month, prev_monday.day, 0, 0, 0)
-    )
-    sunday_ireland = IRELAND_TZ.localize(
-        datetime(prev_sunday.year, prev_sunday.month, prev_sunday.day, 23, 59, 59)
-    )
-
-    # Convert to UTC for Square API
-    monday_utc = monday_ireland.astimezone(pytz.utc)
-    sunday_utc = sunday_ireland.astimezone(pytz.utc)
-
-    return monday_utc.isoformat(), sunday_utc.isoformat()
+    return prev_monday, prev_sunday
 
 
 def _get_team_member_name(member_id: str) -> str:
@@ -79,12 +61,19 @@ def _get_team_member_name(member_id: str) -> str:
 
 def get_shifts_for_week(target_sunday_override=None) -> dict:
     """
-    Pull all closed shifts for the Ireland week (Mon–Sun) from Square.
-    Shifts are stored in UTC; we filter by Ireland-time boundaries converted to UTC.
-    Day classification (weekday vs Sunday) uses Ireland local time.
+    Pull shifts from Square and filter manually by shift start date in Ireland time.
+    Square's date filter is unreliable so we fetch a broader window and filter ourselves.
     """
-    start_at, end_at = _get_week_range(target_sunday_override)
-    log.info(f"Fetching shifts (UTC): {start_at} to {end_at}")
+    week_monday, week_sunday = _get_week_range(target_sunday_override)
+    log.info(f"Collecting shifts for Ireland week: {week_monday} to {week_sunday}")
+
+    # Fetch a 10-day window to be safe (covers timezone edge cases)
+    fetch_start = IRELAND_TZ.localize(
+        datetime(week_monday.year, week_monday.month, week_monday.day, 0, 0, 0)
+    ).astimezone(pytz.utc)
+    fetch_end = IRELAND_TZ.localize(
+        datetime(week_sunday.year, week_sunday.month, week_sunday.day, 23, 59, 59)
+    ).astimezone(pytz.utc)
 
     location_ids     = [lid for lid in LOCATION_MAP.values() if lid]
     location_reverse = {v: k for k, v in LOCATION_MAP.items() if v}
@@ -95,12 +84,17 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
     results    = {sheet: {} for sheet in LOCATION_MAP}
     name_cache = {}
     cursor     = None
+    total_shifts = 0
+    filtered_shifts = 0
 
     while True:
         body = {
             'filter': {
                 'location_ids': location_ids,
-                'start': {'start_at': start_at, 'end_at': end_at},
+                'start': {
+                    'start_at': fetch_start.isoformat(),
+                    'end_at':   fetch_end.isoformat(),
+                },
                 'status': 'CLOSED',
             },
             'limit': 200,
@@ -113,30 +107,37 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
         data = r.json()
 
         for shift in data.get('shifts', []):
+            total_shifts += 1
             location_id = shift.get('location_id')
             sheet_name  = location_reverse.get(location_id)
             if not sheet_name:
                 continue
-
-            member_id = shift.get('team_member_id', '')
-            if member_id not in name_cache:
-                name_cache[member_id] = _get_team_member_name(member_id)
-            name = name_cache[member_id]
 
             start_str = shift.get('start_at')
             end_str   = shift.get('end_at')
             if not start_str or not end_str:
                 continue
 
-            # Convert to Ireland time for hour calculation and day classification
-            shift_start = datetime.fromisoformat(start_str).astimezone(IRELAND_TZ)
-            shift_end   = datetime.fromisoformat(end_str).astimezone(IRELAND_TZ)
-            hours       = (shift_end - shift_start).total_seconds() / 3600
+            # Convert to Ireland time and manually check the shift is in our week
+            shift_start_ireland = datetime.fromisoformat(start_str).astimezone(IRELAND_TZ)
+            shift_end_ireland   = datetime.fromisoformat(end_str).astimezone(IRELAND_TZ)
+            shift_date          = shift_start_ireland.date()
+
+            if shift_date < week_monday or shift_date > week_sunday:
+                continue  # outside our target week — skip
+
+            filtered_shifts += 1
+            hours = (shift_end_ireland - shift_start_ireland).total_seconds() / 3600
+
+            member_id = shift.get('team_member_id', '')
+            if member_id not in name_cache:
+                name_cache[member_id] = _get_team_member_name(member_id)
+            name = name_cache[member_id]
 
             if name not in results[sheet_name]:
                 results[sheet_name][name] = {'weekday_hours': 0.0, 'sunday_hours': 0.0}
 
-            if shift_start.weekday() == 6:  # Sunday in Ireland time
+            if shift_start_ireland.weekday() == 6:  # Sunday
                 results[sheet_name][name]['sunday_hours']  += hours
             else:
                 results[sheet_name][name]['weekday_hours'] += hours
@@ -145,6 +146,7 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
         if not cursor:
             break
 
+    log.info(f"Square returned {total_shifts} shifts total, {filtered_shifts} in target week")
     for sheet, staff in results.items():
         log.info(f"[{sheet}] {len(staff)} staff with shifts this week")
 
