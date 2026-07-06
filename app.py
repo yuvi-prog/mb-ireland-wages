@@ -140,7 +140,7 @@ def upload_template():
     return jsonify({'status': 'uploaded', 'master_template': 'master_template.xlsx', 'generated': path.name})
 
 
-@app.route('/regenerate', methods=['POST'])
+@app.route('/regenerate', methods=['GET', 'POST'])
 def regenerate():
     if not _auth(request):
         return jsonify({'error': 'unauthorized'}), 401
