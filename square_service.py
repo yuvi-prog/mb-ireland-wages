@@ -7,7 +7,7 @@ import requests
 
 log = logging.getLogger(__name__)
 
-IRELAND_TZ = pytz.timezone('Europe/Dublin')
+MELBOURNE_TZ = pytz.timezone('Australia/Melbourne')
 SQUARE_BASE = 'https://connect.squareup.com/v2'
 
 LOCATION_MAP = {
@@ -28,15 +28,15 @@ def _headers():
 
 
 def get_previous_week_sunday() -> date:
-    today = datetime.now(IRELAND_TZ).date()
+    today = datetime.now(MELBOURNE_TZ).date()
     return today - timedelta(days=1)
 
 
-def _get_week_range() -> tuple:
-    prev_sunday = get_previous_week_sunday()
+def _get_week_range(target_sunday=None) -> tuple:
+    prev_sunday = target_sunday if target_sunday else get_previous_week_sunday()
     prev_monday = prev_sunday - timedelta(days=6)
-    monday_dt = IRELAND_TZ.localize(datetime(prev_monday.year, prev_monday.month, prev_monday.day, 0, 0, 0))
-    sunday_dt  = IRELAND_TZ.localize(datetime(prev_sunday.year,  prev_sunday.month,  prev_sunday.day,  23, 59, 59))
+    monday_dt = MELBOURNE_TZ.localize(datetime(prev_monday.year, prev_monday.month, prev_monday.day, 0, 0, 0))
+    sunday_dt  = MELBOURNE_TZ.localize(datetime(prev_sunday.year,  prev_sunday.month,  prev_sunday.day,  23, 59, 59))
     return monday_dt.isoformat(), sunday_dt.isoformat()
 
 
@@ -59,7 +59,7 @@ def _get_team_member_name(member_id: str) -> str:
     return member_id
 
 
-def get_shifts_for_week() -> dict:
+def get_shifts_for_week(target_sunday_override=None) -> dict:
     """
     Pull all closed shifts for the previous week across all Irish locations.
 
@@ -72,7 +72,7 @@ def get_shifts_for_week() -> dict:
             ...
         }
     """
-    start_at, end_at = _get_week_range()
+    start_at, end_at = _get_week_range(target_sunday_override)
     log.info(f"Fetching shifts from {start_at} to {end_at}")
 
     location_ids    = [lid for lid in LOCATION_MAP.values() if lid]
@@ -119,8 +119,8 @@ def get_shifts_for_week() -> dict:
             if not start_str or not end_str:
                 continue
 
-            shift_start = datetime.fromisoformat(start_str).astimezone(IRELAND_TZ)
-            shift_end   = datetime.fromisoformat(end_str).astimezone(IRELAND_TZ)
+            shift_start = datetime.fromisoformat(start_str).astimezone(MELBOURNE_TZ)
+            shift_end   = datetime.fromisoformat(end_str).astimezone(MELBOURNE_TZ)
             hours       = (shift_end - shift_start).total_seconds() / 3600
 
             if name not in results[sheet_name]:
