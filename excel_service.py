@@ -6,6 +6,7 @@ from openpyxl import load_workbook
 log = logging.getLogger(__name__)
 
 LOCATION_SHEETS = ['Blanchardstown', 'Cork', 'Liffey Valley', 'Nutgrove', 'Whitewater']
+INCOME_ROW      = 5   # Row where weekly income figures go
 
 
 def _norm(name: str) -> str:
@@ -14,8 +15,8 @@ def _norm(name: str) -> str:
 
 def _find_week_columns(ws, target_sunday: date):
     """
-    Scan row 3 for a datetime cell matching target_sunday.
-    Returns (weekday_col, sunday_col) as 1-based column indices, or (None, None).
+    Scan row 3 for a datetime matching target_sunday.
+    Returns (weekday_col, sunday_col) as 1-based indices, or (None, None).
     """
     for cell in ws[3]:
         if isinstance(cell.value, datetime) and cell.value.date() == target_sunday:
@@ -23,7 +24,6 @@ def _find_week_columns(ws, target_sunday: date):
             weekday_col = sunday_col - 1
             log.info(f"[{ws.title}] Sunday {target_sunday} → col {sunday_col}, Mon-Sat → col {weekday_col}")
             return weekday_col, sunday_col
-
     log.warning(f"[{ws.title}] No column found for Sunday {target_sunday}")
     return None, None
 
@@ -47,8 +47,8 @@ def _find_staff_row(ws, name: str):
 
 
 def _match_name(square_name: str, sheet_names: list):
-    sq_norm  = _norm(square_name)
-    sq_parts = sq_norm.split()
+    sq_norm   = _norm(square_name)
+    sq_parts  = sq_norm.split()
     sheet_map = {_norm(n): n for n in sheet_names}
 
     if sq_norm in sheet_map:
@@ -61,15 +61,29 @@ def _match_name(square_name: str, sheet_names: list):
 
 
 def _clear_week_columns(ws, weekday_col: int, sunday_col: int):
-    """Wipe all staff hour values in the two columns for this week before writing."""
-    for row in ws.iter_rows(min_row=7, min_col=weekday_col, max_col=sunday_col):
+    """Wipe this week's two columns before writing so stale data never persists."""
+    for row in ws.iter_rows(min_row=5, min_col=weekday_col, max_col=sunday_col):
         for cell in row:
             if cell.column in (weekday_col, sunday_col):
-                if not isinstance(cell.value, str):  # don't wipe formula strings
+                if not isinstance(cell.value, str):
                     cell.value = None
 
 
-def update_excel_wages(file_path: str, shifts: dict, target_sunday: date = None) -> dict:
+def update_excel_wages(
+    file_path: str,
+    shifts: dict,
+    income: dict,
+    target_sunday: date = None,
+) -> dict:
+    """
+    Write shift hours and weekly income into the wages Excel file.
+
+    Args:
+        file_path:     Path to the .xlsx wages file.
+        shifts:        {sheet_name: {square_name: {weekday_hours, sunday_hours}}}
+        income:        {sheet_name: income_float}  — Totals Collected - Gift Cards
+        target_sunday: The Sunday of the week being processed.
+    """
     if target_sunday is None:
         from square_service import get_previous_week_sunday
         target_sunday = get_previous_week_sunday()
@@ -84,17 +98,27 @@ def update_excel_wages(file_path: str, shifts: dict, target_sunday: date = None)
 
         ws              = wb[sheet_name]
         location_shifts = shifts.get(sheet_name, {})
+        location_income = income.get(sheet_name, 0.0)
 
         weekday_col, sunday_col = _find_week_columns(ws, target_sunday)
         if not weekday_col:
             summary[sheet_name] = {'error': f'Column not found for Sunday {target_sunday}'}
             continue
 
-        # Always wipe this week's columns first so stale data never persists
+        # Wipe this week's columns first — prevents stale data
         _clear_week_columns(ws, weekday_col, sunday_col)
 
+        # Write income into row 5 at the weekday column
+        if location_income:
+            ws.cell(row=INCOME_ROW, column=weekday_col).value = location_income
+            log.info(f"[{sheet_name}] Income: €{location_income:.2f} → row {INCOME_ROW}, col {weekday_col}")
+
         if not location_shifts:
-            summary[sheet_name] = {'updated': [], 'unmatched': [], 'note': 'No shifts this week'}
+            summary[sheet_name] = {
+                'updated': [], 'unmatched': [],
+                'note': 'No shifts this week',
+                'income': location_income,
+            }
             continue
 
         sheet_names = _get_sheet_names(ws)
@@ -120,13 +144,17 @@ def update_excel_wages(file_path: str, shifts: dict, target_sunday: date = None)
             if weekday_h > 0:
                 ws.cell(row=row, column=weekday_col).value = weekday_h
             if sunday_h > 0:
-                ws.cell(row=row, column=sunday_col).value = sunday_h
+                ws.cell(row=row, column=sunday_col).value  = sunday_h
 
             updated.append({'name': matched, 'weekday_hours': weekday_h, 'sunday_hours': sunday_h})
             log.info(f"[{sheet_name}] {matched}: {weekday_h}h weekday, {sunday_h}h Sun")
 
-        summary[sheet_name] = {'updated': updated, 'unmatched': unmatched}
-        log.info(f"[{sheet_name}] Done — {len(updated)} updated, {len(unmatched)} unmatched")
+        summary[sheet_name] = {
+            'updated':   updated,
+            'unmatched': unmatched,
+            'income':    location_income,
+        }
+        log.info(f"[{sheet_name}] Done — {len(updated)} updated, {len(unmatched)} unmatched, income €{location_income:.2f}")
 
     wb.save(file_path)
     log.info(f"Saved workbook to {file_path}")
