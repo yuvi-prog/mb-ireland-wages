@@ -40,6 +40,17 @@ def _get_week_range(target_sunday=None):
     return prev_monday, prev_sunday
 
 
+def _week_utc_bounds(week_monday: date, week_sunday: date):
+    """Return (start_utc_iso, end_utc_iso) covering the full Ireland week."""
+    start = IRELAND_TZ.localize(
+        datetime(week_monday.year, week_monday.month, week_monday.day, 0, 0, 0)
+    ).astimezone(pytz.utc)
+    end = IRELAND_TZ.localize(
+        datetime(week_sunday.year, week_sunday.month, week_sunday.day, 23, 59, 59)
+    ).astimezone(pytz.utc)
+    return start.isoformat(), end.isoformat()
+
+
 def _get_team_member_name(member_id: str) -> str:
     try:
         r = requests.get(
@@ -61,19 +72,12 @@ def _get_team_member_name(member_id: str) -> str:
 
 def get_shifts_for_week(target_sunday_override=None) -> dict:
     """
-    Pull shifts from Square and filter manually by shift start date in Ireland time.
-    Square's date filter is unreliable so we fetch a broader window and filter ourselves.
+    Pull closed shifts for the Ireland week and filter manually by Ireland date.
+    Returns {sheet_name: {staff_name: {weekday_hours, sunday_hours}}}
     """
     week_monday, week_sunday = _get_week_range(target_sunday_override)
+    start_at, end_at = _week_utc_bounds(week_monday, week_sunday)
     log.info(f"Collecting shifts for Ireland week: {week_monday} to {week_sunday}")
-
-    # Fetch a 10-day window to be safe (covers timezone edge cases)
-    fetch_start = IRELAND_TZ.localize(
-        datetime(week_monday.year, week_monday.month, week_monday.day, 0, 0, 0)
-    ).astimezone(pytz.utc)
-    fetch_end = IRELAND_TZ.localize(
-        datetime(week_sunday.year, week_sunday.month, week_sunday.day, 23, 59, 59)
-    ).astimezone(pytz.utc)
 
     location_ids     = [lid for lid in LOCATION_MAP.values() if lid]
     location_reverse = {v: k for k, v in LOCATION_MAP.items() if v}
@@ -81,20 +85,17 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
     if not location_ids:
         raise ValueError("No Square location IDs configured.")
 
-    results    = {sheet: {} for sheet in LOCATION_MAP}
-    name_cache = {}
-    cursor     = None
+    results      = {sheet: {} for sheet in LOCATION_MAP}
+    name_cache   = {}
+    cursor       = None
     total_shifts = 0
-    filtered_shifts = 0
+    used_shifts  = 0
 
     while True:
         body = {
             'filter': {
                 'location_ids': location_ids,
-                'start': {
-                    'start_at': fetch_start.isoformat(),
-                    'end_at':   fetch_end.isoformat(),
-                },
+                'start': {'start_at': start_at, 'end_at': end_at},
                 'status': 'CLOSED',
             },
             'limit': 200,
@@ -118,16 +119,15 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
             if not start_str or not end_str:
                 continue
 
-            # Convert to Ireland time and manually check the shift is in our week
-            shift_start_ireland = datetime.fromisoformat(start_str).astimezone(IRELAND_TZ)
-            shift_end_ireland   = datetime.fromisoformat(end_str).astimezone(IRELAND_TZ)
-            shift_date          = shift_start_ireland.date()
+            shift_start = datetime.fromisoformat(start_str).astimezone(IRELAND_TZ)
+            shift_end   = datetime.fromisoformat(end_str).astimezone(IRELAND_TZ)
+            shift_date  = shift_start.date()
 
             if shift_date < week_monday or shift_date > week_sunday:
-                continue  # outside our target week — skip
+                continue
 
-            filtered_shifts += 1
-            hours = (shift_end_ireland - shift_start_ireland).total_seconds() / 3600
+            used_shifts += 1
+            hours = (shift_end - shift_start).total_seconds() / 3600
 
             member_id = shift.get('team_member_id', '')
             if member_id not in name_cache:
@@ -137,7 +137,7 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
             if name not in results[sheet_name]:
                 results[sheet_name][name] = {'weekday_hours': 0.0, 'sunday_hours': 0.0}
 
-            if shift_start_ireland.weekday() == 6:  # Sunday
+            if shift_start.weekday() == 6:
                 results[sheet_name][name]['sunday_hours']  += hours
             else:
                 results[sheet_name][name]['weekday_hours'] += hours
@@ -146,8 +146,73 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
         if not cursor:
             break
 
-    log.info(f"Square returned {total_shifts} shifts total, {filtered_shifts} in target week")
+    log.info(f"Square returned {total_shifts} shifts total, {used_shifts} in target week")
     for sheet, staff in results.items():
         log.info(f"[{sheet}] {len(staff)} staff with shifts this week")
+
+    return results
+
+
+def get_income_for_week(target_sunday_override=None) -> dict:
+    """
+    For each location, calculate: Totals Collected - Gift Vouchers Redeemed.
+    Returns {sheet_name: income_float} in EUR.
+    """
+    week_monday, week_sunday = _get_week_range(target_sunday_override)
+    start_at, end_at = _week_utc_bounds(week_monday, week_sunday)
+    log.info(f"Collecting income for Ireland week: {week_monday} to {week_sunday}")
+
+    results = {}
+
+    for sheet_name, location_id in LOCATION_MAP.items():
+        if not location_id:
+            results[sheet_name] = 0.0
+            continue
+
+        total_collected    = 0
+        gift_card_redeemed = 0
+        cursor = None
+
+        while True:
+            body = {
+                'query': {
+                    'filter': {
+                        'location_ids': [location_id],
+                        'date_time_filter': {
+                            'created_at': {
+                                'start_at': start_at,
+                                'end_at':   end_at,
+                            }
+                        },
+                        'status_filter': {'statuses': ['COMPLETED']},
+                    }
+                },
+                'limit': 500,
+            }
+            if cursor:
+                body['cursor'] = cursor
+
+            r = requests.post(f'{SQUARE_BASE}/payments/search', headers=_headers(), json=body)
+            r.raise_for_status()
+            data = r.json()
+
+            for payment in data.get('payments', []):
+                # Square amounts are in the smallest currency unit (cents)
+                amount = payment.get('total_money', {}).get('amount', 0) / 100
+                total_collected += amount
+
+                if payment.get('source_type') == 'SQUARE_GIFT_CARD':
+                    gift_card_redeemed += amount
+
+            cursor = data.get('cursor')
+            if not cursor:
+                break
+
+        income = round(total_collected - gift_card_redeemed, 2)
+        results[sheet_name] = income
+        log.info(
+            f"[{sheet_name}] Income: €{income:.2f} "
+            f"(collected: €{total_collected:.2f}, gift cards: €{gift_card_redeemed:.2f})"
+        )
 
     return results
