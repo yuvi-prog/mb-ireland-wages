@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify, send_file
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from square_service import get_shifts_for_week, get_previous_week_sunday
+from square_service import get_shifts_for_week, get_income_for_week, get_previous_week_sunday
 from excel_service import update_excel_wages
 from email_service import send_wages_email
 from month_service import (
@@ -75,7 +75,8 @@ def run_wages(target_sunday_override=None):
 
     try:
         shifts = get_shifts_for_week(target_sunday_override=target_sunday)
-        result = update_excel_wages(str(file_path), shifts, target_sunday)
+        income = get_income_for_week(target_sunday_override=target_sunday)
+        result = update_excel_wages(str(file_path), shifts, income, target_sunday)
         send_wages_email(str(file_path), result, target_sunday)
         log.info("=== Weekly wages run complete ===")
     except Exception as e:
