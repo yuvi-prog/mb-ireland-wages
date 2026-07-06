@@ -14,10 +14,8 @@ def _norm(name: str) -> str:
 
 def _find_week_columns(ws, target_sunday: date):
     """
-    Scan row 3 for a datetime cell that matches target_sunday (the Sunday of the week being processed).
-    The Sunday column holds that day's hours; the column directly to its left holds Mon-Sat hours.
-
-    Returns (weekday_col, sunday_col) as 1-based column indices, or (None, None) if not found.
+    Scan row 3 for a datetime cell matching target_sunday.
+    Returns (weekday_col, sunday_col) as 1-based column indices, or (None, None).
     """
     for cell in ws[3]:
         if isinstance(cell.value, datetime) and cell.value.date() == target_sunday:
@@ -31,7 +29,6 @@ def _find_week_columns(ws, target_sunday: date):
 
 
 def _get_sheet_names(ws) -> list:
-    """Return all staff names from column C (rows 7+)."""
     names = []
     for row in ws.iter_rows(min_row=7, min_col=3, max_col=3):
         cell = row[0]
@@ -41,7 +38,6 @@ def _get_sheet_names(ws) -> list:
 
 
 def _find_staff_row(ws, name: str):
-    """Find the Excel row number for a staff member by name (column C, rows 7+)."""
     target = _norm(name)
     for row in ws.iter_rows(min_row=7, min_col=3, max_col=3):
         cell = row[0]
@@ -51,39 +47,29 @@ def _find_staff_row(ws, name: str):
 
 
 def _match_name(square_name: str, sheet_names: list):
-    """
-    Match a Square employee name to a name in the Excel sheet.
-    Strategy: exact → first name → last name.
-    Square names are often 'First Last'; sheet uses first names only.
-    """
     sq_norm  = _norm(square_name)
     sq_parts = sq_norm.split()
     sheet_map = {_norm(n): n for n in sheet_names}
 
     if sq_norm in sheet_map:
         return sheet_map[sq_norm]
-
     if sq_parts and sq_parts[0] in sheet_map:
         return sheet_map[sq_parts[0]]
-
     if len(sq_parts) > 1 and sq_parts[-1] in sheet_map:
         return sheet_map[sq_parts[-1]]
-
     return None
 
 
+def _clear_week_columns(ws, weekday_col: int, sunday_col: int):
+    """Wipe all staff hour values in the two columns for this week before writing."""
+    for row in ws.iter_rows(min_row=7, min_col=weekday_col, max_col=sunday_col):
+        for cell in row:
+            if cell.column in (weekday_col, sunday_col):
+                if not isinstance(cell.value, str):  # don't wipe formula strings
+                    cell.value = None
+
+
 def update_excel_wages(file_path: str, shifts: dict, target_sunday: date = None) -> dict:
-    """
-    Write Square shift hours into the monthly wages Excel file.
-
-    Args:
-        file_path:      Path to the .xlsx wages file.
-        shifts:         {sheet_name: {square_name: {weekday_hours, sunday_hours}}}
-        target_sunday:  The Sunday date of the week being processed.
-
-    Returns:
-        Summary dict per location — who was updated, who wasn't matched.
-    """
     if target_sunday is None:
         from square_service import get_previous_week_sunday
         target_sunday = get_previous_week_sunday()
@@ -93,19 +79,22 @@ def update_excel_wages(file_path: str, shifts: dict, target_sunday: date = None)
 
     for sheet_name in LOCATION_SHEETS:
         if sheet_name not in wb.sheetnames:
-            log.warning(f"Sheet '{sheet_name}' missing from workbook — skipping")
+            log.warning(f"Sheet '{sheet_name}' missing — skipping")
             continue
 
-        ws             = wb[sheet_name]
+        ws              = wb[sheet_name]
         location_shifts = shifts.get(sheet_name, {})
-
-        if not location_shifts:
-            summary[sheet_name] = {'updated': [], 'unmatched': [], 'note': 'No shifts this week'}
-            continue
 
         weekday_col, sunday_col = _find_week_columns(ws, target_sunday)
         if not weekday_col:
             summary[sheet_name] = {'error': f'Column not found for Sunday {target_sunday}'}
+            continue
+
+        # Always wipe this week's columns first so stale data never persists
+        _clear_week_columns(ws, weekday_col, sunday_col)
+
+        if not location_shifts:
+            summary[sheet_name] = {'updated': [], 'unmatched': [], 'note': 'No shifts this week'}
             continue
 
         sheet_names = _get_sheet_names(ws)
@@ -133,12 +122,8 @@ def update_excel_wages(file_path: str, shifts: dict, target_sunday: date = None)
             if sunday_h > 0:
                 ws.cell(row=row, column=sunday_col).value = sunday_h
 
-            updated.append({
-                'name':          matched,
-                'weekday_hours': weekday_h,
-                'sunday_hours':  sunday_h,
-            })
-            log.info(f"[{sheet_name}] {matched}: {weekday_h}h weekday, {sunday_h}h Sunday")
+            updated.append({'name': matched, 'weekday_hours': weekday_h, 'sunday_hours': sunday_h})
+            log.info(f"[{sheet_name}] {matched}: {weekday_h}h weekday, {sunday_h}h Sun")
 
         summary[sheet_name] = {'updated': updated, 'unmatched': unmatched}
         log.info(f"[{sheet_name}] Done — {len(updated)} updated, {len(unmatched)} unmatched")
