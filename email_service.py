@@ -48,6 +48,9 @@ def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
             </tr>""")
             continue
 
+        income      = data.get('income', 0.0)
+        income_html = f"<div style='font-size:13px;font-weight:bold;color:#2c7a2c;margin-bottom:6px'>Income: €{income:,.2f}</div>" if income else ''
+
         staff_lines = ''.join(
             f"<div style='margin:2px 0;font-size:13px'>{u['name']}: "
             f"{u['weekday_hours']}h Mon-Sat, {u['sunday_hours']}h Sun</div>"
@@ -62,7 +65,7 @@ def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
         <tr>
           <td style="padding:8px 12px;font-weight:bold;vertical-align:top">{location}</td>
           <td style="padding:8px 12px;vertical-align:top">{len(updated)} staff</td>
-          <td style="padding:8px 12px">{staff_lines}{unmatched_html}</td>
+          <td style="padding:8px 12px">{income_html}{staff_lines}{unmatched_html}</td>
         </tr>""")
 
     html_body = f"""
