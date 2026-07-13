@@ -1,198 +1,128 @@
+import os
+import base64
 import logging
-from datetime import date, datetime
+from datetime import date, timedelta
+from pathlib import Path
 
-from openpyxl import load_workbook
+import requests
 
 log = logging.getLogger(__name__)
 
-LOCATION_SHEETS   = ['Blanchardstown', 'Cork', 'Liffey Valley', 'Nutgrove', 'Whitewater']
-INCOME_ROW        = 5
-DEFAULT_RATE_WDAY = 14.15
-DEFAULT_RATE_SUN  = 17.98
 
-# Column indices for the formula/summary columns
-COL_NAME     = 3   # C
-COL_RATE_MON = 4   # D
-COL_RATE_SUN = 5   # E
-COL_TOT_WDAY = 18  # R  — total weekday hours
-COL_TOT_WDAY_AMT = 19  # S — weekday pay
-COL_TOT_SUN  = 20  # T  — total sunday hours
-COL_TOT_SUN_AMT  = 21  # U — sunday pay
-COL_FINAL    = 24  # X  — final payment
+def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
+    """Email the updated wages file with a run summary."""
+    api_key    = os.getenv('SENDGRID_API_KEY')
+    to_email   = os.getenv('EMAIL_TO', 'yuvi@memoryblock.com.au')
+    from_email = os.getenv('EMAIL_FROM', 'wages@memoryblock.com.au')
 
+    if not api_key:
+        log.warning("SENDGRID_API_KEY not set — skipping email")
+        return
 
-def _norm(name: str) -> str:
-    return name.strip().lower()
-
-
-def _find_week_columns(ws, target_sunday: date):
-    for cell in ws[3]:
-        if isinstance(cell.value, datetime) and cell.value.date() == target_sunday:
-            sunday_col  = cell.column
-            weekday_col = sunday_col - 1
-            log.info(f"[{ws.title}] Sunday {target_sunday} → col {sunday_col}, Mon-Sat → col {weekday_col}")
-            return weekday_col, sunday_col
-    log.warning(f"[{ws.title}] No column found for Sunday {target_sunday}")
-    return None, None
-
-
-def _get_sheet_names(ws) -> list:
-    names = []
-    for row in ws.iter_rows(min_row=7, min_col=COL_NAME, max_col=COL_NAME):
-        cell = row[0]
-        if cell.value and isinstance(cell.value, str) and cell.value.strip():
-            names.append(cell.value.strip())
-    return names
-
-
-def _find_last_staff_row(ws) -> int:
-    last = 7
-    for row in ws.iter_rows(min_row=7, max_row=50, min_col=COL_NAME, max_col=COL_NAME):
-        if row[0].value and isinstance(row[0].value, str) and row[0].value.strip():
-            last = row[0].row
-    return last
-
-
-def _find_staff_row(ws, name: str):
-    target = _norm(name)
-    for row in ws.iter_rows(min_row=7, min_col=COL_NAME, max_col=COL_NAME):
-        cell = row[0]
-        if cell.value and _norm(str(cell.value)) == target:
-            return cell.row
-    return None
-
-
-def _match_name(square_name: str, sheet_names: list):
-    sq_norm   = _norm(square_name)
-    sq_parts  = sq_norm.split()
-    sheet_map = {_norm(n): n for n in sheet_names}
-
-    if sq_norm in sheet_map:
-        return sheet_map[sq_norm]
-    if sq_parts and sq_parts[0] in sheet_map:
-        return sheet_map[sq_parts[0]]
-    if len(sq_parts) > 1 and sq_parts[-1] in sheet_map:
-        return sheet_map[sq_parts[-1]]
-    return None
-
-
-def _add_new_staff_row(ws, name: str, new_row: int):
-    """
-    Add a new staff member at new_row with default rates and all required formulas.
-    Mirrors the formula pattern of existing staff rows.
-    """
-    r = new_row
-    ws.cell(r, COL_NAME).value     = name
-    ws.cell(r, COL_RATE_MON).value = DEFAULT_RATE_WDAY
-    ws.cell(r, COL_RATE_SUN).value = DEFAULT_RATE_SUN
-
-    # Weekday hours total: F+H+J+L+N+P
-    ws.cell(r, COL_TOT_WDAY).value     = f'=F{r}+H{r}+J{r}+L{r}+N{r}+P{r}'
-    # Weekday pay: total hours × Mon-Sat rate
-    ws.cell(r, COL_TOT_WDAY_AMT).value = f'=R{r}*$D{r}'
-    # Sunday hours total: G+I+K+M+O
-    ws.cell(r, COL_TOT_SUN).value      = f'=G{r}+I{r}+K{r}+M{r}+O{r}'
-    # Sunday pay: total hours × Sunday rate
-    ws.cell(r, COL_TOT_SUN_AMT).value  = f'=T{r}*$E{r}'
-    # Final payment: weekday pay + sunday pay + bonus + adjustment
-    ws.cell(r, COL_FINAL).value        = f'=S{r}+U{r}+V{r}+W{r}'
-
-    log.info(f"[{ws.title}] Added new staff row for '{name}' at row {r} "
-             f"(rates: €{DEFAULT_RATE_WDAY}/h weekday, €{DEFAULT_RATE_SUN}/h Sunday)")
-
-
-def _clear_week_columns(ws, weekday_col: int, sunday_col: int):
-    """Wipe this week's two columns before writing so stale data never persists."""
-    for row in ws.iter_rows(min_row=5, min_col=weekday_col, max_col=sunday_col):
-        for cell in row:
-            if cell.column in (weekday_col, sunday_col):
-                if not isinstance(cell.value, str):
-                    cell.value = None
-
-
-def update_excel_wages(
-    file_path: str,
-    shifts: dict,
-    income: dict,
-    target_sunday: date = None,
-) -> dict:
     if target_sunday is None:
         from square_service import get_previous_week_sunday
         target_sunday = get_previous_week_sunday()
 
-    wb      = load_workbook(file_path)
-    summary = {}
+    week_start = target_sunday - timedelta(days=6)
+    subject    = f"MB Ireland Wages — {week_start.strftime('%d %b')} to {target_sunday.strftime('%d %b %Y')}"
 
-    for sheet_name in LOCATION_SHEETS:
-        if sheet_name not in wb.sheetnames:
-            log.warning(f"Sheet '{sheet_name}' missing — skipping")
+    rows = []
+    for location, data in summary.items():
+        if 'error' in data:
+            rows.append(f"""
+            <tr style="background:#fff3cd">
+              <td style="padding:8px 12px;font-weight:bold">{location}</td>
+              <td colspan="3" style="padding:8px 12px;color:#856404">{data['error']}</td>
+            </tr>""")
             continue
 
-        ws              = wb[sheet_name]
-        location_shifts = shifts.get(sheet_name, {})
-        location_income = income.get(sheet_name, 0.0)
+        updated   = data.get('updated', [])
+        unmatched = data.get('unmatched', [])
+        note      = data.get('note', '')
 
-        weekday_col, sunday_col = _find_week_columns(ws, target_sunday)
-        if not weekday_col:
-            summary[sheet_name] = {'error': f'Column not found for Sunday {target_sunday}'}
+        if note:
+            rows.append(f"""
+            <tr>
+              <td style="padding:8px 12px;font-weight:bold">{location}</td>
+              <td colspan="3" style="padding:8px 12px;color:#6c757d">{note}</td>
+            </tr>""")
             continue
 
-        # Wipe this week's columns first
-        _clear_week_columns(ws, weekday_col, sunday_col)
+        income      = data.get('income', 0.0)
+        income_html = f"<div style='font-size:13px;font-weight:bold;color:#2c7a2c;margin-bottom:6px'>Income: €{income:,.2f}</div>" if income else ''
 
-        # Write income into row 5
-        if location_income:
-            ws.cell(row=INCOME_ROW, column=weekday_col).value = location_income
-            log.info(f"[{ws.title}] Income: €{location_income:.2f} → row {INCOME_ROW}, col {weekday_col}")
+        staff_lines = ''.join(
+            f"<div style='margin:2px 0;font-size:13px'>{u['name']}: "
+            f"{u['weekday_hours']}h Mon-Sat, {u['sunday_hours']}h Sun</div>"
+            for u in updated
+        )
+        unmatched_html = (
+            f"<div style='color:#dc3545;font-size:12px;margin-top:4px'>"
+            f"⚠ Unmatched in Square: {', '.join(unmatched)}</div>"
+        ) if unmatched else ''
 
-        if not location_shifts:
-            summary[sheet_name] = {
-                'updated': [], 'unmatched': [], 'added': [],
-                'note': 'No shifts this week',
-                'income': location_income,
-            }
-            continue
+        added     = data.get('added', [])
+        added_html = (
+            f"<div style='color:#856404;font-size:12px;margin-top:4px'>"
+            f"★ New staff added (default rates — check & adjust): {', '.join(added)}</div>"
+        ) if added else ''
 
-        sheet_names = _get_sheet_names(ws)
-        updated   = []
-        unmatched = []
-        added     = []
+        rows.append(f"""
+        <tr>
+          <td style="padding:8px 12px;font-weight:bold;vertical-align:top">{location}</td>
+          <td style="padding:8px 12px;vertical-align:top">{len(updated)} staff</td>
+          <td style="padding:8px 12px">{income_html}{staff_lines}{unmatched_html}{added_html}</td>
+        </tr>""")
 
-        for sq_name, hours in location_shifts.items():
-            matched = _match_name(sq_name, sheet_names)
+    html_body = f"""
+    <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+      <h2 style="color:#2c3e50;border-bottom:2px solid #e9ecef;padding-bottom:10px">
+        Memory Block Ireland — Weekly Wages
+      </h2>
+      <p style="color:#495057">
+        <strong>Week:</strong> {week_start.strftime('%d %b %Y')} – {target_sunday.strftime('%d %b %Y')}
+      </p>
+      <p>The file is attached. Check for any unmatched staff, add bonuses or adjustments (columns V, W), then process payments.</p>
 
-            if not matched:
-                # Auto-add new staff member at the bottom
-                new_row = _find_last_staff_row(ws) + 1
-                _add_new_staff_row(ws, sq_name, new_row)
-                sheet_names.append(sq_name)  # keep sheet_names in sync
-                matched = sq_name
-                added.append(sq_name)
+      <table style="width:100%;border-collapse:collapse;margin-top:16px">
+        <thead>
+          <tr style="background:#343a40;color:#fff">
+            <th style="padding:10px 12px;text-align:left;width:160px">Location</th>
+            <th style="padding:10px 12px;text-align:left;width:80px">Staff</th>
+            <th style="padding:10px 12px;text-align:left">Detail</th>
+          </tr>
+        </thead>
+        <tbody>{''.join(rows)}</tbody>
+      </table>
 
-            row = _find_staff_row(ws, matched)
-            if not row:
-                unmatched.append(sq_name)
-                continue
+      <p style="color:#adb5bd;font-size:11px;margin-top:24px">
+        Auto-generated by MB Ireland Wages System · Do not reply to this email
+      </p>
+    </div>
+    """
 
-            weekday_h = round(hours['weekday_hours'], 2)
-            sunday_h  = round(hours['sunday_hours'],  2)
+    with open(file_path, 'rb') as f:
+        file_data = base64.b64encode(f.read()).decode()
 
-            if weekday_h > 0:
-                ws.cell(row=row, column=weekday_col).value = weekday_h
-            if sunday_h > 0:
-                ws.cell(row=row, column=sunday_col).value  = sunday_h
+    payload = {
+        "personalizations": [{"to": [{"email": to_email}]}],
+        "from": {"email": from_email, "name": "MB Ireland Wages"},
+        "subject": subject,
+        "content": [{"type": "text/html", "value": html_body}],
+        "attachments": [{
+            "content":  file_data,
+            "type":     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "filename": Path(file_path).name,
+        }],
+    }
 
-            updated.append({'name': matched, 'weekday_hours': weekday_h, 'sunday_hours': sunday_h})
-            log.info(f"[{ws.title}] {matched}: {weekday_h}h weekday, {sunday_h}h Sun")
+    r = requests.post(
+        'https://api.sendgrid.com/v3/mail/send',
+        json=payload,
+        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+    )
 
-        summary[sheet_name] = {
-            'updated':   updated,
-            'unmatched': unmatched,
-            'added':     added,
-            'income':    location_income,
-        }
-        log.info(f"[{ws.title}] Done — {len(updated)} updated, {len(added)} added, {len(unmatched)} unmatched")
-
-    wb.save(file_path)
-    log.info(f"Saved workbook to {file_path}")
-    return summary
+    if r.status_code == 202:
+        log.info(f"Wages email sent to {to_email}")
+    else:
+        log.error(f"SendGrid error {r.status_code}: {r.text}")
