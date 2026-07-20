@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
     """Email the updated wages file with a run summary."""
     api_key    = os.getenv('SENDGRID_API_KEY')
-    to_email   = os.getenv('EMAIL_TO', 'yuvi@memoryblock.com.au')
+    to_emails  = [e.strip() for e in os.getenv('EMAIL_TO', 'yuvi@memoryblock.com.au').split(',')]
     from_email = os.getenv('EMAIL_FROM', 'wages@memoryblock.com.au')
 
     if not api_key:
@@ -105,7 +105,7 @@ def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
         file_data = base64.b64encode(f.read()).decode()
 
     payload = {
-        "personalizations": [{"to": [{"email": to_email}]}],
+        "personalizations": [{"to": [{"email": e} for e in to_emails]}],
         "from": {"email": from_email, "name": "MB Ireland Wages"},
         "subject": subject,
         "content": [{"type": "text/html", "value": html_body}],
@@ -123,6 +123,6 @@ def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
     )
 
     if r.status_code == 202:
-        log.info(f"Wages email sent to {to_email}")
+        log.info(f"Wages email sent to {', '.join(to_emails)}")
     else:
         log.error(f"SendGrid error {r.status_code}: {r.text}")
