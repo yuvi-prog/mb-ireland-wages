@@ -14,7 +14,6 @@ SQUARE_BASE  = 'https://connect.squareup.com/v2'
 LOCATION_MAP = {
     'Blanchardstown': os.getenv('SQUARE_LOC_BLANCHARDSTOWN'),
     'Cork':           os.getenv('SQUARE_LOC_CORK'),
-    'Liffey Valley':  os.getenv('SQUARE_LOC_LIFFEY_VALLEY'),
     'Nutgrove':       os.getenv('SQUARE_LOC_NUTGROVE'),
     'Whitewater':     os.getenv('SQUARE_LOC_WHITEWATER'),
 }
