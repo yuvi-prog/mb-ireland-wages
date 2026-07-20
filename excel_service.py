@@ -5,24 +5,36 @@ from openpyxl import load_workbook
 
 log = logging.getLogger(__name__)
 
-LOCATION_SHEETS   = ['Blanchardstown', 'Cork', 'Liffey Valley', 'Nutgrove', 'Whitewater']
-INCOME_ROW        = 5
+LOCATION_SHEETS  = ['Blanchardstown', 'Cork', 'Liffey Valley', 'Nutgrove', 'Whitewater']
+ACTIVE_SHEETS    = ['Blanchardstown', 'Cork', 'Nutgrove']  # Liffey Valley sold, Whitewater seasonal
+INCOME_ROW       = 5
 DEFAULT_RATE_WDAY = 14.15
 DEFAULT_RATE_SUN  = 17.98
 
-# Column indices for the formula/summary columns
 COL_NAME     = 3   # C
 COL_RATE_MON = 4   # D
 COL_RATE_SUN = 5   # E
-COL_TOT_WDAY = 18  # R  — total weekday hours
-COL_TOT_WDAY_AMT = 19  # S — weekday pay
-COL_TOT_SUN  = 20  # T  — total sunday hours
-COL_TOT_SUN_AMT  = 21  # U — sunday pay
-COL_FINAL    = 24  # X  — final payment
+COL_TOT_WDAY     = 18  # R — total weekday hours
+COL_TOT_WDAY_PAY = 19  # S — weekday pay
+COL_TOT_SUN      = 20  # T — total sunday hours
+COL_TOT_SUN_PAY  = 21  # U — sunday pay
+COL_BONUS        = 22  # V
+COL_ADJ          = 23  # W
+COL_FINAL        = 24  # X
+
+WEEKDAY_COLS = [6, 8, 10, 12, 14, 16]   # F, H, J, L, N, P
+SUNDAY_COLS  = [7, 9, 11, 13, 15]        # G, I, K, M, O
 
 
 def _norm(name: str) -> str:
     return name.strip().lower()
+
+
+def _num(v):
+    try:
+        return float(v) if v is not None and not isinstance(v, str) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _find_week_columns(ws, target_sunday: date):
@@ -63,10 +75,9 @@ def _find_staff_row(ws, name: str):
 
 
 def _match_name(square_name: str, sheet_names: list):
-    sq_norm   = _norm(square_name)
-    sq_parts  = sq_norm.split()
+    sq_norm  = _norm(square_name)
+    sq_parts = sq_norm.split()
     sheet_map = {_norm(n): n for n in sheet_names}
-
     if sq_norm in sheet_map:
         return sheet_map[sq_norm]
     if sq_parts and sq_parts[0] in sheet_map:
@@ -77,32 +88,61 @@ def _match_name(square_name: str, sheet_names: list):
 
 
 def _add_new_staff_row(ws, name: str, new_row: int):
-    """
-    Add a new staff member at new_row with default rates and all required formulas.
-    Mirrors the formula pattern of existing staff rows.
-    """
     r = new_row
     ws.cell(r, COL_NAME).value     = name
     ws.cell(r, COL_RATE_MON).value = DEFAULT_RATE_WDAY
     ws.cell(r, COL_RATE_SUN).value = DEFAULT_RATE_SUN
-
-    # Weekday hours total: F+H+J+L+N+P
+    # Write formulas so Excel can recalculate if needed
     ws.cell(r, COL_TOT_WDAY).value     = f'=F{r}+H{r}+J{r}+L{r}+N{r}+P{r}'
-    # Weekday pay: total hours × Mon-Sat rate
-    ws.cell(r, COL_TOT_WDAY_AMT).value = f'=R{r}*$D{r}'
-    # Sunday hours total: G+I+K+M+O
+    ws.cell(r, COL_TOT_WDAY_PAY).value = f'=R{r}*$D{r}'
     ws.cell(r, COL_TOT_SUN).value      = f'=G{r}+I{r}+K{r}+M{r}+O{r}'
-    # Sunday pay: total hours × Sunday rate
-    ws.cell(r, COL_TOT_SUN_AMT).value  = f'=T{r}*$E{r}'
-    # Final payment: weekday pay + sunday pay + bonus + adjustment
+    ws.cell(r, COL_TOT_SUN_PAY).value  = f'=T{r}*$E{r}'
     ws.cell(r, COL_FINAL).value        = f'=S{r}+U{r}+V{r}+W{r}'
+    log.info(f"[{ws.title}] Added '{name}' at row {r} with default rates")
 
-    log.info(f"[{ws.title}] Added new staff row for '{name}' at row {r} "
-             f"(rates: €{DEFAULT_RATE_WDAY}/h weekday, €{DEFAULT_RATE_SUN}/h Sunday)")
+
+def _write_staff_totals(ws, row: int, rate_mon: float, rate_sun: float):
+    """
+    Compute and write hard values for the summary columns (R, S, T, U, X).
+    This replaces formula strings with actual numbers so the Final Payment
+    SUMIF always picks up correct values regardless of Excel's formula cache.
+    """
+    total_wday = sum(_num(ws.cell(row, c).value) for c in WEEKDAY_COLS)
+    total_sun  = sum(_num(ws.cell(row, c).value) for c in SUNDAY_COLS)
+    bonus      = _num(ws.cell(row, COL_BONUS).value)
+    adj        = _num(ws.cell(row, COL_ADJ).value)
+
+    wday_pay = total_wday * rate_mon
+    sun_pay  = total_sun  * rate_sun
+    final    = wday_pay + sun_pay + bonus + adj
+
+    ws.cell(row, COL_TOT_WDAY).value     = round(total_wday, 2)
+    ws.cell(row, COL_TOT_WDAY_PAY).value = round(wday_pay, 2)
+    ws.cell(row, COL_TOT_SUN).value      = round(total_sun, 2)
+    ws.cell(row, COL_TOT_SUN_PAY).value  = round(sun_pay, 2)
+    ws.cell(row, COL_FINAL).value        = round(final, 2)
+
+
+def _clear_inactive_sheet(ws):
+    """
+    Zero out all data for inactive location sheets (Liffey Valley, Whitewater)
+    so the Final Payment SUMIF picks up 0 instead of stale cached values.
+    """
+    for row in ws.iter_rows(min_row=7, max_row=50):
+        name = ws.cell(row[0].row, COL_NAME).value
+        if not name or not isinstance(name, str):
+            continue
+        r = row[0].row
+        # Clear hour columns F-P
+        for col in range(6, 17):
+            ws.cell(r, col).value = None
+        # Write 0 to summary columns (overwrite any formula strings with hard zeros)
+        for col in [COL_TOT_WDAY, COL_TOT_WDAY_PAY, COL_TOT_SUN, COL_TOT_SUN_PAY, COL_FINAL]:
+            ws.cell(r, col).value = 0
 
 
 def _clear_week_columns(ws, weekday_col: int, sunday_col: int):
-    """Wipe this week's two columns before writing so stale data never persists."""
+    """Wipe this week's two data columns before writing."""
     for row in ws.iter_rows(min_row=5, min_col=weekday_col, max_col=sunday_col):
         for cell in row:
             if cell.column in (weekday_col, sunday_col):
@@ -123,7 +163,14 @@ def update_excel_wages(
     wb      = load_workbook(file_path)
     summary = {}
 
+    # First: zero out inactive sheets so Final Payment SUMIF gets clean zeros
     for sheet_name in LOCATION_SHEETS:
+        if sheet_name not in ACTIVE_SHEETS and sheet_name in wb.sheetnames:
+            _clear_inactive_sheet(wb[sheet_name])
+            log.info(f"[{sheet_name}] Cleared (inactive location)")
+
+    # Then: process active sheets
+    for sheet_name in ACTIVE_SHEETS:
         if sheet_name not in wb.sheetnames:
             log.warning(f"Sheet '{sheet_name}' missing — skipping")
             continue
@@ -137,13 +184,11 @@ def update_excel_wages(
             summary[sheet_name] = {'error': f'Column not found for Sunday {target_sunday}'}
             continue
 
-        # Wipe this week's columns first
         _clear_week_columns(ws, weekday_col, sunday_col)
 
-        # Write income into row 5
         if location_income:
             ws.cell(row=INCOME_ROW, column=weekday_col).value = location_income
-            log.info(f"[{ws.title}] Income: €{location_income:.2f} → row {INCOME_ROW}, col {weekday_col}")
+            log.info(f"[{sheet_name}] Income: €{location_income:.2f} → row {INCOME_ROW}, col {weekday_col}")
 
         if not location_shifts:
             summary[sheet_name] = {
@@ -151,6 +196,14 @@ def update_excel_wages(
                 'note': 'No shifts this week',
                 'income': location_income,
             }
+            # Still recompute totals for all existing staff
+            sheet_names = _get_sheet_names(ws)
+            for name in sheet_names:
+                row = _find_staff_row(ws, name)
+                if row:
+                    rate_mon = _num(ws.cell(row, COL_RATE_MON).value)
+                    rate_sun = _num(ws.cell(row, COL_RATE_SUN).value)
+                    _write_staff_totals(ws, row, rate_mon, rate_sun)
             continue
 
         sheet_names = _get_sheet_names(ws)
@@ -162,10 +215,9 @@ def update_excel_wages(
             matched = _match_name(sq_name, sheet_names)
 
             if not matched:
-                # Auto-add new staff member at the bottom
                 new_row = _find_last_staff_row(ws) + 1
                 _add_new_staff_row(ws, sq_name, new_row)
-                sheet_names.append(sq_name)  # keep sheet_names in sync
+                sheet_names.append(sq_name)
                 matched = sq_name
                 added.append(sq_name)
 
@@ -183,7 +235,15 @@ def update_excel_wages(
                 ws.cell(row=row, column=sunday_col).value  = sunday_h
 
             updated.append({'name': matched, 'weekday_hours': weekday_h, 'sunday_hours': sunday_h})
-            log.info(f"[{ws.title}] {matched}: {weekday_h}h weekday, {sunday_h}h Sun")
+            log.info(f"[{sheet_name}] {matched}: {weekday_h}h weekday, {sunday_h}h Sun")
+
+        # Recompute totals for ALL staff in sheet (not just updated ones)
+        for name in sheet_names:
+            row = _find_staff_row(ws, name)
+            if row:
+                rate_mon = _num(ws.cell(row, COL_RATE_MON).value)
+                rate_sun = _num(ws.cell(row, COL_RATE_SUN).value)
+                _write_staff_totals(ws, row, rate_mon, rate_sun)
 
         summary[sheet_name] = {
             'updated':   updated,
@@ -191,7 +251,7 @@ def update_excel_wages(
             'added':     added,
             'income':    location_income,
         }
-        log.info(f"[{ws.title}] Done — {len(updated)} updated, {len(added)} added, {len(unmatched)} unmatched")
+        log.info(f"[{sheet_name}] Done — {len(updated)} updated, {len(added)} added, {len(unmatched)} unmatched")
 
     wb.save(file_path)
     log.info(f"Saved workbook to {file_path}")
