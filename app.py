@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from square_service import get_shifts_for_week, get_income_for_week, get_previous_week_sunday
 from excel_service import update_excel_wages
 from email_service import send_wages_email
+from admin import admin_bp
 from month_service import (
     refresh_for_month, monthly_filename, MONTH_NAMES
 )
@@ -174,6 +175,8 @@ def list_files():
 
 
 # ── scheduler ─────────────────────────────────────────────────────────────────
+
+app.register_blueprint(admin_bp)
 
 scheduler = BackgroundScheduler(timezone=MELBOURNE_TZ)
 scheduler.add_job(
