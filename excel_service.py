@@ -341,3 +341,91 @@ def update_excel_wages(
     wb.save(file_path)
     log.info(f"Saved workbook to {file_path}")
     return summary
+
+
+def write_prev_month_end(file_path: str, shifts: dict, income: dict) -> dict:
+    """
+    Write the in-month weekday portion of a cross-month week to the PREVIOUS month's file.
+    Finds the last non-Sunday data column (the end partial) and writes there.
+    Does NOT use Sunday datetime for column detection (Sunday is in the next month's file).
+    """
+    wb = load_workbook(file_path)
+    summary = {}
+
+    for sheet_name in ACTIVE_SHEETS:
+        if sheet_name not in wb.sheetnames:
+            continue
+
+        ws              = wb[sheet_name]
+        location_shifts = shifts.get(sheet_name, {})
+        location_income = income.get(sheet_name, {})
+        income_primary  = location_income.get('income', 0.0) if isinstance(location_income, dict) else float(location_income or 0)
+
+        # Find the last non-Sunday data column (the partial end column)
+        end_col = None
+        for col in range(DATA_COL_START, DATA_COL_END + 1):
+            label = ws.cell(PERIOD_ROW, col).value
+            if label and label != 'Sun':
+                end_col = col
+
+        if not end_col:
+            log.warning(f"[{sheet_name}] Could not find end partial column in prev month file")
+            continue
+
+        # Clear end column
+        for row_idx in range(INCOME_ROW, STAFF_ROW_END + 1):
+            cell = ws.cell(row_idx, end_col)
+            if not isinstance(cell.value, str):
+                cell.value = None
+
+        if income_primary:
+            ws.cell(INCOME_ROW, end_col).value = income_primary
+
+        if not location_shifts:
+            summary[sheet_name] = {'updated': [], 'unmatched': [], 'added': [], 'note': 'No shifts', 'income': income_primary}
+            for name in _get_sheet_names(ws):
+                row = _find_staff_row(ws, name)
+                if row:
+                    _write_staff_totals(ws, row,
+                                        _num(ws.cell(row, COL_RATE_MON).value),
+                                        _num(ws.cell(row, COL_RATE_SUN_COL).value))
+            continue
+
+        sheet_names = _get_sheet_names(ws)
+        updated   = []
+        unmatched = []
+
+        for sq_name, hours in location_shifts.items():
+            weekday_h = round(hours['weekday_hours'], 2)
+            if weekday_h == 0:
+                continue
+
+            matched = _match_name(sq_name, sheet_names)
+            if not matched:
+                unmatched.append(sq_name)
+                log.warning(f"[{sheet_name}] Could not match '{sq_name}' in prev month file")
+                continue
+
+            row = _find_staff_row(ws, matched)
+            if not row:
+                unmatched.append(sq_name)
+                continue
+
+            ws.cell(row, end_col).value = weekday_h
+            updated.append({'name': matched, 'weekday_hours': weekday_h, 'sunday_hours': 0.0})
+            log.info(f"[{sheet_name}] (prev month) {matched}: {weekday_h}h weekday")
+
+        # Recompute totals for all staff
+        for name in _get_sheet_names(ws):
+            row = _find_staff_row(ws, name)
+            if row:
+                _write_staff_totals(ws, row,
+                                    _num(ws.cell(row, COL_RATE_MON).value),
+                                    _num(ws.cell(row, COL_RATE_SUN_COL).value))
+
+        summary[sheet_name] = {'updated': updated, 'unmatched': unmatched, 'added': [], 'income': income_primary}
+        log.info(f"[{sheet_name}] (prev month) Done — {len(updated)} updated, {len(unmatched)} unmatched")
+
+    wb.save(file_path)
+    log.info(f"Saved prev month file: {file_path}")
+    return summary
