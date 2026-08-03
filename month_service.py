@@ -1,12 +1,17 @@
 """
-month_service.py — auto-generates monthly wages files from the master template.
+month_service.py
 
-Cross-month splits: when a Mon-Sat period crosses a month boundary the period
-is emitted as TWO columns (e.g. 'Mon-Fri 27-31 Jul' + 'Sat 01 Aug') so every
-day is visible and income can be attributed accurately. Splits are only applied
-when the total number of columns stays within the 11-column limit (F-P). Months
-with 4+ full weeks that also have cross-month boundaries on both ends cannot
-fit splits and fall back to combined labels (e.g. 'Mon-Sat 27 Jul-01 Aug').
+Each month's file contains ONLY that month's working days.
+When a week crosses a month boundary the data is split across two files:
+  - previous month's file gets the Mon→last_day_of_prev_month portion
+  - current month's file gets the first_day_of_curr_month→Sat portion + Sunday
+
+Column rule:
+  - Partial START = from first day of THIS month to Saturday of that week
+    (no previous-month days — those live in the previous month's file)
+    Exception: months starting on Monday show previous Fri-Sat + Sun (payroll convention)
+  - Partial END   = from Monday of the last week to the last day of THIS month
+    (no next-month days — those live in the next month's file)
 """
 
 import calendar
@@ -27,17 +32,14 @@ DATE_ROW        = 3
 STAFF_ROW_START = 7
 STAFF_ROW_END   = 25
 DATA_COL_START  = 6    # F
-DATA_COL_END    = 16   # P  — max 11 data columns
+DATA_COL_END    = 16   # P  (max 11 data columns)
 
 MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June',
                'July', 'August', 'September', 'October', 'November', 'December']
 MONTH_ABBR  = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 DAY_ABBR    = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-MAX_COLS    = DATA_COL_END - DATA_COL_START + 1   # 11
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _range_label(start: date, end: date) -> str:
     if start.month == end.month:
@@ -51,106 +53,41 @@ def _dow_label(start: date, end: date) -> str:
     return f"{s}-{e}" if s != e else s
 
 
-def _crosses_month(start: date, end: date) -> bool:
-    return start.month != end.month
-
-
-def _split_period(start: date, end: date):
-    """If start/end cross a month boundary return (end_of_first_month, start_of_next_month)."""
-    if _crosses_month(start, end):
-        last = date(start.year, start.month,
-                    calendar.monthrange(start.year, start.month)[1])
-        return last, last + timedelta(days=1)
-    return None, None
-
-
-def _plan_splits(year: int, month: int):
-    """
-    Pre-compute whether start and/or end partial columns should be split.
-    Returns (p_start, p_end, sunday, do_start_split, do_end_split).
-    """
-    first_day = date(year, month, 1)
-    last_day  = date(year, month, calendar.monthrange(year, month)[1])
-    dow       = first_day.weekday()
-
-    if dow == 0:
-        p_start = first_day - timedelta(days=3)
-        p_end   = first_day - timedelta(days=2)
-        sunday  = first_day - timedelta(days=1)
-    else:
-        p_start = first_day - timedelta(days=dow)
-        p_end   = p_start + timedelta(days=5)
-        sunday  = p_start + timedelta(days=6)
-
-    start_crosses = _crosses_month(p_start, p_end)
-
-    # Count full weeks
-    full_weeks = 0
-    cm = sunday + timedelta(days=1)
-    while cm <= last_day:
-        if cm + timedelta(days=5) > last_day:
-            break
-        full_weeks += 1
-        cm += timedelta(days=7)
-
-    has_end     = cm <= last_day
-    end_crosses = has_end and _crosses_month(cm, cm + timedelta(days=5))
-
-    n_s = 2 if start_crosses else 1
-    n_e = (2 if end_crosses else 1) if has_end else 0
-    total_both = n_s + 1 + full_weeks * 2 + n_e
-
-    if total_both <= MAX_COLS:
-        do_start = start_crosses
-        do_end   = end_crosses
-    elif (1 + 1 + full_weeks * 2 + (2 if end_crosses else 1 if has_end else 0)) <= MAX_COLS:
-        do_start = False
-        do_end   = end_crosses
-    elif (n_s + 1 + full_weeks * 2 + (1 if has_end else 0)) <= MAX_COLS:
-        do_start = start_crosses
-        do_end   = False
-    else:
-        do_start = False
-        do_end   = False
-
-    return p_start, p_end, sunday, do_start, do_end
-
-
-# ── Main generator ────────────────────────────────────────────────────────────
-
 def generate_week_columns(year: int, month: int) -> list:
     """
     Build column definitions for a given month.
 
-    Each entry: (row2_label, row3_value, col_type)
-      col_type: 'weekday' | 'cross_month' | 'sunday'
+    Partial start: from the first day of the month to the Saturday of that week.
+    Partial end:   from Monday of the last week to the last day of the month.
+    No days from adjacent months appear — cross-month data lives in those months' files.
+
+    Exception: months starting on Monday use the payroll convention of showing
+    the previous week's Fri-Sat + Sun as the first columns.
+
+    Returns list of (row2_label, row3_value, col_type):
+      col_type: 'weekday' | 'sunday'
     """
     first_day = date(year, month, 1)
     last_day  = date(year, month, calendar.monthrange(year, month)[1])
+    dow       = first_day.weekday()   # Mon=0
 
-    p_start, p_end, sunday, do_start_split, do_end_split = _plan_splits(year, month)
-
-    cols = []
-
-    # ── Partial start ─────────────────────────────────────────────────────────
-    split_end, split_start = _split_period(p_start, p_end)
-    if do_start_split and split_end:
-        cols.append((_dow_label(p_start, split_end),
-                     _range_label(p_start, split_end),
-                     'weekday'))
-        cols.append((_dow_label(split_start, p_end),
-                     _range_label(split_start, p_end),
-                     'cross_month'))
+    if dow == 0:
+        # Month starts Monday — payroll convention: show prev Fri-Sat + Sun
+        p_start = first_day - timedelta(days=3)   # Friday (prev month)
+        p_end   = first_day - timedelta(days=2)   # Saturday (prev month)
+        sunday  = first_day - timedelta(days=1)   # Sunday (prev month)
     else:
-        cols.append((_dow_label(p_start, p_end),
-                     _range_label(p_start, p_end),
-                     'weekday'))
+        # Month starts Tue-Sun:
+        # Partial start = first_day to Saturday of that week (all in this month)
+        p_start = first_day
+        p_end   = first_day + timedelta(days=(5 - dow))   # Saturday of that week
+        sunday  = p_end + timedelta(days=1)                # Sunday of that week
 
-    cols.append(('Sun',
-                 datetime(sunday.year, sunday.month, sunday.day),
-                 'sunday'))
+    cols = [
+        (_dow_label(p_start, p_end), _range_label(p_start, p_end), 'weekday'),
+        ('Sun', datetime(sunday.year, sunday.month, sunday.day), 'sunday'),
+    ]
 
-    # ── Full weeks + partial end ──────────────────────────────────────────────
     current_monday = sunday + timedelta(days=1)
 
     while current_monday <= last_day:
@@ -158,34 +95,20 @@ def generate_week_columns(year: int, month: int) -> list:
         sun = current_monday + timedelta(days=6)
 
         if sat > last_day:
-            # Partial end
-            split_end2, split_start2 = _split_period(current_monday, sat)
-            if do_end_split and split_end2:
-                cols.append((_dow_label(current_monday, split_end2),
-                             _range_label(current_monday, split_end2),
-                             'weekday'))
-                cols.append((_dow_label(split_start2, sat),
-                             _range_label(split_start2, sat),
-                             'cross_month'))
-            else:
-                cols.append((_dow_label(current_monday, sat),
-                             _range_label(current_monday, sat),
-                             'weekday'))
+            # Partial end: Mon to last day of THIS month only
+            pe_end = last_day
+            cols.append((_dow_label(current_monday, pe_end),
+                         _range_label(current_monday, pe_end),
+                         'weekday'))
             break
         else:
-            cols.append(('Mon-Sat',
-                         _range_label(current_monday, sat),
-                         'weekday'))
-            cols.append(('Sun',
-                         datetime(sun.year, sun.month, sun.day),
-                         'sunday'))
+            cols.append(('Mon-Sat', _range_label(current_monday, sat), 'weekday'))
+            cols.append(('Sun', datetime(sun.year, sun.month, sun.day), 'sunday'))
 
         current_monday += timedelta(days=7)
 
     return cols
 
-
-# ── Core refresh logic ────────────────────────────────────────────────────────
 
 def _refresh_location_sheet(ws, year: int, month: int):
     ws.cell(row=MONTH_ROW, column=MONTH_COL).value = MONTH_NAMES[month].upper()
@@ -222,7 +145,7 @@ def refresh_for_month(master_path: str, output_path: str, year: int, month: int)
     if 'Final Payment' in wb.sheetnames:
         dow = date(year, month, 1).weekday()
         ps  = (date(year, month, 1) - timedelta(days=3) if dow == 0
-               else date(year, month, 1) - timedelta(days=dow))
+               else date(year, month, 1))
         wb['Final Payment'].cell(row=1, column=2).value = datetime(
             ps.year, ps.month, ps.day)
 
