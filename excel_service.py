@@ -373,7 +373,7 @@ def write_prev_month_end(file_path: str, shifts: dict, income: dict) -> dict:
             continue
 
         # Clear end column
-        for row_idx in range(INCOME_ROW, STAFF_ROW_END + 1):
+        for row_idx in range(INCOME_ROW, 51):
             cell = ws.cell(row_idx, end_col)
             if not isinstance(cell.value, str):
                 cell.value = None
