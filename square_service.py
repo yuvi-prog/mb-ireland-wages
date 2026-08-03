@@ -226,9 +226,9 @@ def get_income_for_week(target_sunday_override=None) -> dict:
         import calendar
         last_of_month  = date(week_monday.year, week_monday.month,
                               calendar.monthrange(week_monday.year, week_monday.month)[1])
-        primary_end    = last_of_month     # e.g. Fri Jul 31
-        cross_start    = week_saturday     # e.g. Sat Aug 1
-        cross_end      = week_saturday     # same day
+        primary_end    = last_of_month                        # last day of prev month
+        cross_start    = last_of_month + timedelta(days=1)    # first day of new month
+        cross_end      = week_saturday                         # Saturday (end of week)
     else:
         primary_end = week_saturday
         cross_start = cross_end = None
