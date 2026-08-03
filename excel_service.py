@@ -5,25 +5,26 @@ from openpyxl import load_workbook
 
 log = logging.getLogger(__name__)
 
-LOCATION_SHEETS  = ['Blanchardstown', 'Cork', 'Liffey Valley', 'Nutgrove', 'Whitewater']
-ACTIVE_SHEETS    = ['Blanchardstown', 'Cork', 'Nutgrove']  # Liffey Valley sold, Whitewater seasonal
-INCOME_ROW       = 5
+LOCATION_SHEETS   = ['Blanchardstown', 'Cork', 'Liffey Valley', 'Nutgrove', 'Whitewater']
+ACTIVE_SHEETS     = ['Blanchardstown', 'Cork', 'Nutgrove']
+INCOME_ROW        = 5
 DEFAULT_RATE_WDAY = 14.15
 DEFAULT_RATE_SUN  = 17.98
 
-COL_NAME     = 3   # C
-COL_RATE_MON = 4   # D
-COL_RATE_SUN = 5   # E
-COL_TOT_WDAY     = 18  # R — total weekday hours
-COL_TOT_WDAY_PAY = 19  # S — weekday pay
-COL_TOT_SUN      = 20  # T — total sunday hours
-COL_TOT_SUN_PAY  = 21  # U — sunday pay
+COL_NAME         = 3   # C
+COL_RATE_MON     = 4   # D
+COL_RATE_SUN_COL = 5   # E
+COL_TOT_WDAY     = 18  # R
+COL_TOT_WDAY_PAY = 19  # S
+COL_TOT_SUN      = 20  # T
+COL_TOT_SUN_PAY  = 21  # U
 COL_BONUS        = 22  # V
 COL_ADJ          = 23  # W
 COL_FINAL        = 24  # X
 
-WEEKDAY_COLS = [6, 8, 10, 12, 14, 16]   # F, H, J, L, N, P
-SUNDAY_COLS  = [7, 9, 11, 13, 15]        # G, I, K, M, O
+DATA_COL_START = 6   # F
+DATA_COL_END   = 16  # P
+PERIOD_ROW     = 2
 
 
 def _norm(name: str) -> str:
@@ -37,15 +38,63 @@ def _num(v):
         return 0.0
 
 
+def _sheet_col_types(ws) -> dict:
+    """
+    Return {col_index: 'weekday'|'cross_month'|'sunday'|None} by reading row 2 labels.
+    'Sunday' columns have label 'Sun'.
+    All other labelled columns are weekday (including cross-month splits).
+    """
+    result = {}
+    for col in range(DATA_COL_START, DATA_COL_END + 1):
+        label = ws.cell(PERIOD_ROW, col).value
+        if label == 'Sun':
+            result[col] = 'sunday'
+        elif label:
+            result[col] = 'weekday'
+        else:
+            result[col] = None
+    return result
+
+
 def _find_week_columns(ws, target_sunday: date):
+    """
+    Find column indices for a given week's Sunday.
+
+    For a normal week: [Mon-Sat col] [Sun col]
+    For a cross-month week: [weekday col] [cross_month col] [Sun col]
+
+    Detection: if the column immediately before the Sunday is NOT 'Mon-Sat' and NOT 'Sun',
+    AND the column before that is also a labelled non-Sunday column → cross-month split.
+
+    Returns (weekday_col, sunday_col, cross_month_col) where cross_month_col may be None.
+    """
     for cell in ws[3]:
         if isinstance(cell.value, datetime) and cell.value.date() == target_sunday:
-            sunday_col  = cell.column
-            weekday_col = sunday_col - 1
-            log.info(f"[{ws.title}] Sunday {target_sunday} → col {sunday_col}, Mon-Sat → col {weekday_col}")
-            return weekday_col, sunday_col
+            sunday_col = cell.column
+            prev_label      = ws.cell(PERIOD_ROW, sunday_col - 1).value or ''
+            prev_prev_label = ws.cell(PERIOD_ROW, sunday_col - 2).value or ''
+
+            # Cross-month: two non-Sunday, non-Mon-Sat columns before the Sunday
+            is_cross = (
+                prev_label not in ('Mon-Sat', 'Sun', '') and
+                prev_prev_label not in ('Sun', '')
+            )
+
+            if is_cross:
+                cross_month_col = sunday_col - 1
+                weekday_col     = sunday_col - 2
+                log.info(
+                    f"[{ws.title}] Sunday {target_sunday} → col {sunday_col} | "
+                    f"cross-month col {cross_month_col} | weekday col {weekday_col}"
+                )
+                return weekday_col, sunday_col, cross_month_col
+            else:
+                weekday_col = sunday_col - 1
+                log.info(f"[{ws.title}] Sunday {target_sunday} → col {sunday_col} | weekday col {weekday_col}")
+                return weekday_col, sunday_col, None
+
     log.warning(f"[{ws.title}] No column found for Sunday {target_sunday}")
-    return None, None
+    return None, None, None
 
 
 def _get_sheet_names(ws) -> list:
@@ -89,13 +138,24 @@ def _match_name(square_name: str, sheet_names: list):
 
 def _add_new_staff_row(ws, name: str, new_row: int):
     r = new_row
-    ws.cell(r, COL_NAME).value     = name
-    ws.cell(r, COL_RATE_MON).value = DEFAULT_RATE_WDAY
-    ws.cell(r, COL_RATE_SUN).value = DEFAULT_RATE_SUN
-    # Write formulas so Excel can recalculate if needed
-    ws.cell(r, COL_TOT_WDAY).value     = f'=F{r}+H{r}+J{r}+L{r}+N{r}+P{r}'
+    ws.cell(r, COL_NAME).value         = name
+    ws.cell(r, COL_RATE_MON).value     = DEFAULT_RATE_WDAY
+    ws.cell(r, COL_RATE_SUN_COL).value = DEFAULT_RATE_SUN
+
+    # Build formulas based on actual column layout (handles split columns)
+    col_types = _sheet_col_types(ws)
+    wday_cols = [col for col, t in col_types.items() if t == 'weekday']
+    sun_cols  = [col for col, t in col_types.items() if t == 'sunday']
+
+    def col_letter(c):
+        return chr(64 + c) if c <= 26 else chr(64 + c // 26) + chr(64 + c % 26)
+
+    wday_formula = '+'.join(f'{col_letter(c)}{r}' for c in wday_cols) or '0'
+    sun_formula  = '+'.join(f'{col_letter(c)}{r}' for c in sun_cols)  or '0'
+
+    ws.cell(r, COL_TOT_WDAY).value     = f'={wday_formula}'
     ws.cell(r, COL_TOT_WDAY_PAY).value = f'=R{r}*$D{r}'
-    ws.cell(r, COL_TOT_SUN).value      = f'=G{r}+I{r}+K{r}+M{r}+O{r}'
+    ws.cell(r, COL_TOT_SUN).value      = f'={sun_formula}'
     ws.cell(r, COL_TOT_SUN_PAY).value  = f'=T{r}*$E{r}'
     ws.cell(r, COL_FINAL).value        = f'=S{r}+U{r}+V{r}+W{r}'
     log.info(f"[{ws.title}] Added '{name}' at row {r} with default rates")
@@ -103,12 +163,13 @@ def _add_new_staff_row(ws, name: str, new_row: int):
 
 def _write_staff_totals(ws, row: int, rate_mon: float, rate_sun: float):
     """
-    Compute and write hard values for the summary columns (R, S, T, U, X).
-    This replaces formula strings with actual numbers so the Final Payment
-    SUMIF always picks up correct values regardless of Excel's formula cache.
+    Compute and hard-write summary columns (R, S, T, U, X).
+    Reads column types dynamically so split columns are handled correctly.
+    ALL non-Sunday labelled columns count as weekday hours (including cross-month).
     """
-    total_wday = sum(_num(ws.cell(row, c).value) for c in WEEKDAY_COLS)
-    total_sun  = sum(_num(ws.cell(row, c).value) for c in SUNDAY_COLS)
+    col_types  = _sheet_col_types(ws)
+    total_wday = sum(_num(ws.cell(row, c).value) for c, t in col_types.items() if t == 'weekday')
+    total_sun  = sum(_num(ws.cell(row, c).value) for c, t in col_types.items() if t == 'sunday')
     bonus      = _num(ws.cell(row, COL_BONUS).value)
     adj        = _num(ws.cell(row, COL_ADJ).value)
 
@@ -124,30 +185,26 @@ def _write_staff_totals(ws, row: int, rate_mon: float, rate_sun: float):
 
 
 def _clear_inactive_sheet(ws):
-    """
-    Zero out all data for inactive location sheets (Liffey Valley, Whitewater)
-    so the Final Payment SUMIF picks up 0 instead of stale cached values.
-    """
     for row in ws.iter_rows(min_row=7, max_row=50):
         name = ws.cell(row[0].row, COL_NAME).value
         if not name or not isinstance(name, str):
             continue
         r = row[0].row
-        # Clear hour columns F-P
-        for col in range(6, 17):
+        for col in range(DATA_COL_START, DATA_COL_END + 1):
             ws.cell(r, col).value = None
-        # Write 0 to summary columns (overwrite any formula strings with hard zeros)
         for col in [COL_TOT_WDAY, COL_TOT_WDAY_PAY, COL_TOT_SUN, COL_TOT_SUN_PAY, COL_FINAL]:
             ws.cell(r, col).value = 0
 
 
-def _clear_week_columns(ws, weekday_col: int, sunday_col: int):
-    """Wipe this week's two data columns before writing."""
-    for row in ws.iter_rows(min_row=5, min_col=weekday_col, max_col=sunday_col):
-        for cell in row:
-            if cell.column in (weekday_col, sunday_col):
-                if not isinstance(cell.value, str):
-                    cell.value = None
+def _clear_week_columns(ws, weekday_col: int, sunday_col: int, cross_month_col=None):
+    cols_to_clear = {weekday_col, sunday_col}
+    if cross_month_col:
+        cols_to_clear.add(cross_month_col)
+    for col in cols_to_clear:
+        for row in ws.iter_rows(min_row=INCOME_ROW, min_col=col, max_col=col):
+            cell = row[0]
+            if not isinstance(cell.value, str):
+                cell.value = None
 
 
 def update_excel_wages(
@@ -163,13 +220,11 @@ def update_excel_wages(
     wb      = load_workbook(file_path)
     summary = {}
 
-    # First: zero out inactive sheets so Final Payment SUMIF gets clean zeros
+    # Zero out inactive sheets
     for sheet_name in LOCATION_SHEETS:
         if sheet_name not in ACTIVE_SHEETS and sheet_name in wb.sheetnames:
             _clear_inactive_sheet(wb[sheet_name])
-            log.info(f"[{sheet_name}] Cleared (inactive location)")
 
-    # Then: process active sheets
     for sheet_name in ACTIVE_SHEETS:
         if sheet_name not in wb.sheetnames:
             log.warning(f"Sheet '{sheet_name}' missing — skipping")
@@ -177,33 +232,47 @@ def update_excel_wages(
 
         ws              = wb[sheet_name]
         location_shifts = shifts.get(sheet_name, {})
-        location_income = income.get(sheet_name, 0.0)
+        location_income = income.get(sheet_name, {})
 
-        weekday_col, sunday_col = _find_week_columns(ws, target_sunday)
+        if isinstance(location_income, dict):
+            income_primary = location_income.get('income', 0.0)
+            income_cross   = location_income.get('cross_month_income', 0.0)
+        else:
+            income_primary = float(location_income or 0)
+            income_cross   = 0.0
+
+        weekday_col, sunday_col, cross_month_col = _find_week_columns(ws, target_sunday)
         if not weekday_col:
             summary[sheet_name] = {'error': f'Column not found for Sunday {target_sunday}'}
             continue
 
-        _clear_week_columns(ws, weekday_col, sunday_col)
+        _clear_week_columns(ws, weekday_col, sunday_col, cross_month_col)
 
-        if location_income:
-            ws.cell(row=INCOME_ROW, column=weekday_col).value = location_income
-            log.info(f"[{sheet_name}] Income: €{location_income:.2f} → row {INCOME_ROW}, col {weekday_col}")
+        # Write income
+        if cross_month_col:
+            # Separate columns available — split the income
+            if income_primary:
+                ws.cell(row=INCOME_ROW, column=weekday_col).value = income_primary
+            if income_cross:
+                ws.cell(row=INCOME_ROW, column=cross_month_col).value = income_cross
+        else:
+            # No separate cross-month column — combine income into one
+            total_income = income_primary + income_cross
+            if total_income:
+                ws.cell(row=INCOME_ROW, column=weekday_col).value = round(total_income, 2)
 
         if not location_shifts:
             summary[sheet_name] = {
                 'updated': [], 'unmatched': [], 'added': [],
                 'note': 'No shifts this week',
-                'income': location_income,
+                'income': income_primary, 'cross_month_income': income_cross,
             }
-            # Still recompute totals for all existing staff
-            sheet_names = _get_sheet_names(ws)
-            for name in sheet_names:
+            for name in _get_sheet_names(ws):
                 row = _find_staff_row(ws, name)
                 if row:
-                    rate_mon = _num(ws.cell(row, COL_RATE_MON).value)
-                    rate_sun = _num(ws.cell(row, COL_RATE_SUN).value)
-                    _write_staff_totals(ws, row, rate_mon, rate_sun)
+                    _write_staff_totals(ws, row,
+                                        _num(ws.cell(row, COL_RATE_MON).value),
+                                        _num(ws.cell(row, COL_RATE_SUN_COL).value))
             continue
 
         sheet_names = _get_sheet_names(ws)
@@ -226,32 +295,48 @@ def update_excel_wages(
                 unmatched.append(sq_name)
                 continue
 
-            weekday_h = round(hours['weekday_hours'], 2)
-            sunday_h  = round(hours['sunday_hours'],  2)
+            weekday_h     = round(hours['weekday_hours'], 2)
+            sunday_h      = round(hours['sunday_hours'],  2)
+            cross_month_h = round(hours.get('cross_month_hours', 0.0), 2)
 
             if weekday_h > 0:
                 ws.cell(row=row, column=weekday_col).value = weekday_h
             if sunday_h > 0:
                 ws.cell(row=row, column=sunday_col).value  = sunday_h
+            if cross_month_h > 0:
+                if cross_month_col:
+                    ws.cell(row=row, column=cross_month_col).value = cross_month_h
+                else:
+                    # No separate column — add to weekday total
+                    existing = _num(ws.cell(row=row, column=weekday_col).value)
+                    ws.cell(row=row, column=weekday_col).value = round(existing + cross_month_h, 2)
 
-            updated.append({'name': matched, 'weekday_hours': weekday_h, 'sunday_hours': sunday_h})
-            log.info(f"[{sheet_name}] {matched}: {weekday_h}h weekday, {sunday_h}h Sun")
+            updated.append({
+                'name':              matched,
+                'weekday_hours':     weekday_h,
+                'sunday_hours':      sunday_h,
+                'cross_month_hours': cross_month_h,
+            })
+            log.info(f"[{sheet_name}] {matched}: {weekday_h}h weekday, "
+                     f"{cross_month_h}h cross-month, {sunday_h}h Sun")
 
-        # Recompute totals for ALL staff in sheet (not just updated ones)
+        # Recompute totals for ALL staff
         for name in sheet_names:
             row = _find_staff_row(ws, name)
             if row:
-                rate_mon = _num(ws.cell(row, COL_RATE_MON).value)
-                rate_sun = _num(ws.cell(row, COL_RATE_SUN).value)
-                _write_staff_totals(ws, row, rate_mon, rate_sun)
+                _write_staff_totals(ws, row,
+                                    _num(ws.cell(row, COL_RATE_MON).value),
+                                    _num(ws.cell(row, COL_RATE_SUN_COL).value))
 
         summary[sheet_name] = {
-            'updated':   updated,
-            'unmatched': unmatched,
-            'added':     added,
-            'income':    location_income,
+            'updated':            updated,
+            'unmatched':          unmatched,
+            'added':              added,
+            'income':             income_primary,
+            'cross_month_income': income_cross,
         }
-        log.info(f"[{sheet_name}] Done — {len(updated)} updated, {len(added)} added, {len(unmatched)} unmatched")
+        log.info(f"[{sheet_name}] Done — {len(updated)} updated, {len(added)} added, "
+                 f"{len(unmatched)} unmatched | income €{income_primary:.2f} + €{income_cross:.2f}")
 
     wb.save(file_path)
     log.info(f"Saved workbook to {file_path}")
