@@ -126,3 +126,125 @@ def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
         log.info(f"Wages email sent to {', '.join(to_emails)}")
     else:
         log.error(f"SendGrid error {r.status_code}: {r.text}")
+
+
+def send_wages_email_cross_month(
+    prev_file: str, curr_file: str,
+    result_prev: dict, result_curr: dict,
+    target_sunday,
+):
+    """Send wages email with TWO attachments when a week crosses a month boundary."""
+    import base64, calendar
+    from datetime import timedelta
+    from pathlib import Path
+
+    api_key    = os.getenv('SENDGRID_API_KEY')
+    to_emails  = [e.strip() for e in os.getenv('EMAIL_TO', 'yuvi@memoryblock.com.au').split(',')]
+    from_email = os.getenv('EMAIL_FROM', 'wages@memoryblock.com.au')
+
+    if not api_key:
+        log.warning("SENDGRID_API_KEY not set — skipping email")
+        return
+
+    week_sunday = target_sunday
+    week_monday = week_sunday - timedelta(days=6)
+    week_saturday = week_monday + timedelta(days=5)
+
+    subject = (
+        f"MB Ireland Wages — {week_monday.strftime('%d %b')} to "
+        f"{week_saturday.strftime('%d %b')} + Sun {week_sunday.strftime('%d %b %Y')} "
+        f"[cross-month]"
+    )
+
+    def _build_rows(result, title):
+        rows = []
+        for location, data in result.items():
+            if 'error' in data:
+                rows.append(f"<tr style='background:#fff3cd'><td style='padding:8px 12px;font-weight:bold'>{location}</td>"
+                            f"<td colspan='2' style='padding:8px 12px;color:#856404'>{data['error']}</td></tr>")
+                continue
+            updated   = data.get('updated', [])
+            unmatched = data.get('unmatched', [])
+            added     = data.get('added', [])
+            income    = data.get('income', 0.0)
+            note      = data.get('note', '')
+            if note:
+                rows.append(f"<tr><td style='padding:8px 12px;font-weight:bold'>{location}</td>"
+                            f"<td colspan='2' style='padding:8px 12px;color:#6c757d'>{note}</td></tr>")
+                continue
+            income_html  = f"<div style='font-size:13px;font-weight:bold;color:#2c7a2c;margin-bottom:4px'>Income: €{income:,.2f}</div>" if income else ''
+            staff_lines  = ''.join(f"<div style='font-size:13px'>{u['name']}: {u['weekday_hours']}h</div>" for u in updated)
+            added_html   = f"<div style='color:#856404;font-size:12px'>★ New: {', '.join(added)}</div>" if added else ''
+            unmatched_html = f"<div style='color:#dc3545;font-size:12px'>⚠ Unmatched: {', '.join(unmatched)}</div>" if unmatched else ''
+            rows.append(f"<tr><td style='padding:8px 12px;font-weight:bold;vertical-align:top'>{location}</td>"
+                        f"<td style='padding:8px 12px;vertical-align:top'>{len(updated)} staff</td>"
+                        f"<td style='padding:8px 12px'>{income_html}{staff_lines}{added_html}{unmatched_html}</td></tr>")
+        return rows
+
+    prev_rows = _build_rows(result_prev, 'prev')
+    curr_rows = _build_rows(result_curr, 'curr')
+
+    from pathlib import Path as P2
+    prev_month_name = P2(prev_file).stem.split('_')[2] + ' ' + P2(prev_file).stem.split('_')[3]
+    curr_month_name = P2(curr_file).stem.split('_')[2] + ' ' + P2(curr_file).stem.split('_')[3]
+
+    html_body = f"""
+    <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto">
+      <h2 style="color:#2c3e50;border-bottom:2px solid #e9ecef;padding-bottom:10px">
+        Memory Block Ireland — Cross-Month Wages Week
+      </h2>
+      <p><strong>Week:</strong> {week_monday.strftime('%d %b %Y')} – {week_saturday.strftime('%d %b %Y')} + Sun {week_sunday.strftime('%d %b %Y')}</p>
+      <p>This week spans two months. Two files are attached — one for each month.</p>
+
+      <h3 style="margin-top:20px">{prev_month_name} portion ({week_monday.strftime('%d %b')} – {(week_saturday - timedelta(days=1) if week_saturday.month != week_monday.month else week_saturday).strftime('%d %b')})</h3>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="background:#343a40;color:#fff">
+          <th style="padding:8px 12px;text-align:left">Location</th>
+          <th style="padding:8px 12px;text-align:left">Staff</th>
+          <th style="padding:8px 12px;text-align:left">Detail</th>
+        </tr></thead>
+        <tbody>{''.join(prev_rows)}</tbody>
+      </table>
+
+      <h3 style="margin-top:20px">{curr_month_name} portion ({week_saturday.strftime('%d %b')} + Sun {week_sunday.strftime('%d %b')})</h3>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="background:#343a40;color:#fff">
+          <th style="padding:8px 12px;text-align:left">Location</th>
+          <th style="padding:8px 12px;text-align:left">Staff</th>
+          <th style="padding:8px 12px;text-align:left">Detail</th>
+        </tr></thead>
+        <tbody>{''.join(curr_rows)}</tbody>
+      </table>
+
+      <p style="color:#adb5bd;font-size:11px;margin-top:24px">
+        Auto-generated by MB Ireland Wages System
+      </p>
+    </div>
+    """
+
+    attachments = []
+    for fp in [prev_file, curr_file]:
+        with open(fp, 'rb') as f:
+            attachments.append({
+                "content":  base64.b64encode(f.read()).decode(),
+                "type":     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "filename": Path(fp).name,
+            })
+
+    payload = {
+        "personalizations": [{"to": [{"email": e} for e in to_emails]}],
+        "from": {"email": from_email, "name": "MB Ireland Wages"},
+        "subject": subject,
+        "content": [{"type": "text/html", "value": html_body}],
+        "attachments": attachments,
+    }
+
+    r = requests.post(
+        'https://api.sendgrid.com/v3/mail/send',
+        json=payload,
+        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+    )
+    if r.status_code == 202:
+        log.info(f"Cross-month wages email sent to {', '.join(to_emails)}")
+    else:
+        log.error(f"SendGrid error {r.status_code}: {r.text}")
