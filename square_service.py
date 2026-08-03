@@ -14,6 +14,7 @@ SQUARE_BASE  = 'https://connect.squareup.com/v2'
 LOCATION_MAP = {
     'Blanchardstown': os.getenv('SQUARE_LOC_BLANCHARDSTOWN'),
     'Cork':           os.getenv('SQUARE_LOC_CORK'),
+    'Liffey Valley':  os.getenv('SQUARE_LOC_LIFFEY_VALLEY'),
     'Nutgrove':       os.getenv('SQUARE_LOC_NUTGROVE'),
     'Whitewater':     os.getenv('SQUARE_LOC_WHITEWATER'),
 }
@@ -33,14 +34,12 @@ def get_previous_week_sunday() -> date:
 
 
 def _get_week_range(target_sunday=None):
-    """Return (monday, sunday) as date objects for the target week."""
     prev_sunday = target_sunday or get_previous_week_sunday()
     prev_monday = prev_sunday - timedelta(days=6)
     return prev_monday, prev_sunday
 
 
 def _week_utc_bounds(week_monday: date, week_sunday: date):
-    """Return (start_utc_iso, end_utc_iso) covering the full Ireland week."""
     start = IRELAND_TZ.localize(
         datetime(week_monday.year, week_monday.month, week_monday.day, 0, 0, 0)
     ).astimezone(pytz.utc)
@@ -52,18 +51,13 @@ def _week_utc_bounds(week_monday: date, week_sunday: date):
 
 def _get_team_member_name(member_id: str) -> str:
     try:
-        r = requests.get(
-            f'{SQUARE_BASE}/team-members/{member_id}',
-            headers=_headers(),
-            timeout=10,
-        )
+        r = requests.get(f'{SQUARE_BASE}/team-members/{member_id}',
+                         headers=_headers(), timeout=10)
         if r.status_code == 200:
             m = r.json().get('team_member', {})
-            return (
-                m.get('display_name')
-                or f"{m.get('given_name','').strip()} {m.get('family_name','').strip()}".strip()
-                or member_id
-            )
+            return (m.get('display_name') or
+                    f"{m.get('given_name','').strip()} {m.get('family_name','').strip()}".strip() or
+                    member_id)
     except Exception as e:
         log.warning(f"Could not fetch team member {member_id}: {e}")
     return member_id
@@ -72,11 +66,23 @@ def _get_team_member_name(member_id: str) -> str:
 def get_shifts_for_week(target_sunday_override=None) -> dict:
     """
     Pull closed shifts for the Ireland week and filter manually by Ireland date.
-    Returns {sheet_name: {staff_name: {weekday_hours, sunday_hours}}}
+
+    When a week crosses a month boundary (e.g. Mon Jul 27 - Sat Aug 1),
+    hours are split:
+      weekday_hours      = Mon-Sat shifts in the PRIMARY month (e.g. Mon-Fri Jul)
+      sunday_hours       = Sunday shifts
+      cross_month_hours  = weekday shifts in the OTHER month (e.g. Sat Aug 1)
+
+    Returns:
+        {sheet_name: {staff_name: {weekday_hours, sunday_hours, cross_month_hours}}}
     """
     week_monday, week_sunday = _get_week_range(target_sunday_override)
     start_at, end_at = _week_utc_bounds(week_monday, week_sunday)
     log.info(f"Collecting shifts for Ireland week: {week_monday} to {week_sunday}")
+
+    # Determine if the weekday portion crosses a month boundary
+    week_saturday = week_monday + timedelta(days=5)
+    cross_month   = week_saturday.month != week_monday.month
 
     location_ids     = [lid for lid in LOCATION_MAP.values() if lid]
     location_reverse = {v: k for k, v in LOCATION_MAP.items() if v}
@@ -102,7 +108,8 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
         if cursor:
             body['cursor'] = cursor
 
-        r = requests.post(f'{SQUARE_BASE}/labor/shifts/search', headers=_headers(), json=body)
+        r = requests.post(f'{SQUARE_BASE}/labor/shifts/search',
+                          headers=_headers(), json=body)
         r.raise_for_status()
         data = r.json()
 
@@ -134,10 +141,17 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
             name = name_cache[member_id]
 
             if name not in results[sheet_name]:
-                results[sheet_name][name] = {'weekday_hours': 0.0, 'sunday_hours': 0.0}
+                results[sheet_name][name] = {
+                    'weekday_hours':      0.0,
+                    'sunday_hours':       0.0,
+                    'cross_month_hours':  0.0,
+                }
 
-            if shift_start.weekday() == 6:
-                results[sheet_name][name]['sunday_hours']  += hours
+            if shift_start.weekday() == 6:   # Sunday
+                results[sheet_name][name]['sunday_hours'] += hours
+            elif cross_month and shift_date.month != week_monday.month:
+                # Shift is in the cross-month portion (e.g. Saturday of next month)
+                results[sheet_name][name]['cross_month_hours'] += hours
             else:
                 results[sheet_name][name]['weekday_hours'] += hours
 
@@ -152,58 +166,94 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
     return results
 
 
+def _fetch_income_for_period(location_id: str, period_start: date, period_end: date) -> float:
+    """
+    Fetch Totals Collected - Gift Vouchers Redeemed for a specific date range and location.
+    period_start and period_end are inclusive dates (Ireland time).
+    """
+    start_at, end_at = _week_utc_bounds(period_start, period_end)
+    total_collected    = 0.0
+    gift_card_redeemed = 0.0
+    cursor = None
+
+    while True:
+        params = {
+            'location_id': location_id,
+            'begin_time':  start_at,
+            'end_time':    end_at,
+            'limit':       500,
+        }
+        if cursor:
+            params['cursor'] = cursor
+
+        r = requests.get(f'{SQUARE_BASE}/payments', headers=_headers(), params=params)
+        r.raise_for_status()
+        data = r.json()
+
+        for payment in data.get('payments', []):
+            amount = payment.get('total_money', {}).get('amount', 0) / 100
+            total_collected += amount
+            if payment.get('source_type') == 'SQUARE_GIFT_CARD':
+                gift_card_redeemed += amount
+
+        cursor = data.get('cursor')
+        if not cursor:
+            break
+
+    return round(total_collected - gift_card_redeemed, 2)
+
+
 def get_income_for_week(target_sunday_override=None) -> dict:
     """
-    For each location, calculate: Totals Collected - Gift Vouchers Redeemed.
-    Uses GET /v2/payments with query params (correct Square endpoint).
-    Returns {sheet_name: income_float} in EUR.
+    Fetch Totals Collected - Gift Vouchers Redeemed for each location.
+
+    When a week crosses a month boundary, TWO separate Square API calls are made
+    to get the actual income for each portion — no approximation.
+
+        e.g. Mon-Fri Jul 27-31 → call Square for Jul 27-31 → exact July income
+             Sat Aug 1          → call Square for Aug 1 only → exact August income
+
+    Returns:
+        {sheet_name: {'income': float, 'cross_month_income': float}}
     """
     week_monday, week_sunday = _get_week_range(target_sunday_override)
-    start_at, end_at = _week_utc_bounds(week_monday, week_sunday)
     log.info(f"Collecting income for Ireland week: {week_monday} to {week_sunday}")
+
+    week_saturday = week_monday + timedelta(days=5)
+    cross_month   = week_saturday.month != week_monday.month
+
+    if cross_month:
+        import calendar
+        last_of_month  = date(week_monday.year, week_monday.month,
+                              calendar.monthrange(week_monday.year, week_monday.month)[1])
+        primary_end    = last_of_month     # e.g. Fri Jul 31
+        cross_start    = week_saturday     # e.g. Sat Aug 1
+        cross_end      = week_saturday     # same day
+    else:
+        primary_end = week_saturday
+        cross_start = cross_end = None
 
     results = {}
 
     for sheet_name, location_id in LOCATION_MAP.items():
         if not location_id:
-            results[sheet_name] = 0.0
+            results[sheet_name] = {'income': 0.0, 'cross_month_income': 0.0}
             continue
 
-        total_collected    = 0
-        gift_card_redeemed = 0
-        cursor = None
+        income_primary = _fetch_income_for_period(location_id, week_monday, primary_end)
 
-        while True:
-            params = {
-                'location_id': location_id,
-                'begin_time':  start_at,
-                'end_time':    end_at,
-                'limit':       500,
-            }
-            if cursor:
-                params['cursor'] = cursor
+        if cross_month and cross_start:
+            income_cross = _fetch_income_for_period(location_id, cross_start, cross_end)
+        else:
+            income_cross = 0.0
 
-            r = requests.get(f'{SQUARE_BASE}/payments', headers=_headers(), params=params)
-            r.raise_for_status()
-            data = r.json()
-
-            for payment in data.get('payments', []):
-                # Square amounts are in the smallest currency unit (cents)
-                amount = payment.get('total_money', {}).get('amount', 0) / 100
-                total_collected += amount
-
-                if payment.get('source_type') == 'SQUARE_GIFT_CARD':
-                    gift_card_redeemed += amount
-
-            cursor = data.get('cursor')
-            if not cursor:
-                break
-
-        income = round(total_collected - gift_card_redeemed, 2)
-        results[sheet_name] = income
+        results[sheet_name] = {
+            'income':            income_primary,
+            'cross_month_income': income_cross,
+        }
         log.info(
-            f"[{sheet_name}] Income: €{income:.2f} "
-            f"(collected: €{total_collected:.2f}, gift cards: €{gift_card_redeemed:.2f})"
+            f"[{sheet_name}] Income: €{income_primary:.2f} ({week_monday} to {primary_end})"
+            + (f" + €{income_cross:.2f} ({cross_start})" if income_cross else "")
         )
 
     return results
