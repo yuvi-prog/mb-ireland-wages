@@ -124,6 +124,13 @@ def _refresh_location_sheet(ws, year: int, month: int):
         ws.cell(row=PERIOD_ROW, column=col).value = label
         ws.cell(row=DATE_ROW,   column=col).value = val
 
+    # Clear income row (5) and total hours row (4) across data columns
+    for col in range(DATA_COL_START, DATA_COL_END + 1):
+        for r in [4, 5]:
+            cell = ws.cell(row=r, column=col)
+            if not isinstance(cell.value, str):
+                cell.value = None
+
     # Clear weekly data columns F-P
     for row in range(STAFF_ROW_START, STAFF_ROW_END + 1):
         for col in range(DATA_COL_START, DATA_COL_END + 1):
