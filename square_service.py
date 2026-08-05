@@ -63,7 +63,7 @@ def _get_team_member_name(member_id: str) -> str:
     return member_id
 
 
-def get_shifts_for_week(target_sunday_override=None) -> dict:
+def get_shifts_for_week(target_sunday_override=None, cutoff_date=None) -> dict:
     """
     Pull closed shifts for the Ireland week and filter manually by Ireland date.
 
@@ -77,8 +77,11 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
         {sheet_name: {staff_name: {weekday_hours, sunday_hours, cross_month_hours}}}
     """
     week_monday, week_sunday = _get_week_range(target_sunday_override)
-    start_at, end_at = _week_utc_bounds(week_monday, week_sunday)
-    log.info(f"Collecting shifts for Ireland week: {week_monday} to {week_sunday}")
+    # For preliminary runs, only fetch up to cutoff_date (Ireland time)
+    effective_end = min(week_sunday, cutoff_date) if cutoff_date else week_sunday
+    start_at, end_at = _week_utc_bounds(week_monday, effective_end)
+    log.info(f"Collecting shifts for Ireland week: {week_monday} to {week_sunday} "
+             f"(fetching up to {effective_end})")
 
     # Determine if the weekday portion crosses a month boundary
     week_saturday = week_monday + timedelta(days=5)
@@ -129,7 +132,7 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
             shift_end   = datetime.fromisoformat(end_str).astimezone(IRELAND_TZ)
             shift_date  = shift_start.date()
 
-            if shift_date < week_monday or shift_date > week_sunday:
+            if shift_date < week_monday or shift_date > effective_end:
                 continue
 
             used_shifts += 1
@@ -216,7 +219,7 @@ def _fetch_income_for_period(location_id: str, period_start: date, period_end: d
     return round(total_collected - gift_card_redeemed, 2)
 
 
-def get_income_for_week(target_sunday_override=None) -> dict:
+def get_income_for_week(target_sunday_override=None, cutoff_date=None) -> dict:
     """
     Fetch Totals Collected - Gift Vouchers Redeemed for each location.
 
@@ -230,7 +233,9 @@ def get_income_for_week(target_sunday_override=None) -> dict:
         {sheet_name: {'income': float, 'cross_month_income': float}}
     """
     week_monday, week_sunday = _get_week_range(target_sunday_override)
-    log.info(f"Collecting income for Ireland week: {week_monday} to {week_sunday}")
+    effective_end = min(week_sunday, cutoff_date) if cutoff_date else week_sunday
+    log.info(f"Collecting income for Ireland week: {week_monday} to {week_sunday} "
+             f"(fetching up to {effective_end})")
 
     week_saturday = week_monday + timedelta(days=5)
     cross_month   = week_saturday.month != week_monday.month
@@ -239,9 +244,9 @@ def get_income_for_week(target_sunday_override=None) -> dict:
         import calendar
         last_of_month  = date(week_monday.year, week_monday.month,
                               calendar.monthrange(week_monday.year, week_monday.month)[1])
-        primary_end    = last_of_month                        # last day of prev month
-        cross_start    = last_of_month + timedelta(days=1)    # first day of new month
-        cross_end      = week_saturday                         # Saturday (end of week)
+        primary_end    = min(last_of_month, effective_end)
+        cross_start    = last_of_month + timedelta(days=1)
+        cross_end      = min(week_saturday, effective_end)
     else:
         primary_end = week_saturday
         cross_start = cross_end = None
