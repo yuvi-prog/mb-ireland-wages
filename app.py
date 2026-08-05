@@ -14,12 +14,11 @@ from email_service import send_wages_email, send_wages_email_cross_month
 from month_service import (
     refresh_for_month, monthly_filename, MONTH_NAMES
 )
-from admin import admin_bp
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s — %(message)s')
 log = logging.getLogger(__name__)
 
 app          = Flask(__name__)
-app.register_blueprint(admin_bp)
 DATA_DIR     = Path(os.getenv('DATA_DIR', '/data'))
 API_KEY      = os.getenv('API_KEY', 'changeme')
 MELBOURNE_TZ = pytz.timezone('Australia/Melbourne')
@@ -56,7 +55,7 @@ def get_current_monthly_file(target_sunday=None) -> Path | None:
 
 # ── Main wages job ─────────────────────────────────────────────────────────────
 
-def run_wages(target_sunday_override=None, end_of_month_preliminary=False):
+def run_wages(target_sunday_override=None, end_of_month_preliminary=False, cutoff_date=None):
     log.info("=== Weekly wages run started ===")
 
     try:
@@ -70,8 +69,8 @@ def run_wages(target_sunday_override=None, end_of_month_preliminary=False):
         log.info(f"Processing week {week_monday} to {target_sunday} "
                  f"({'cross-month' if is_cross else 'single-month'})")
 
-        shifts = get_shifts_for_week(target_sunday_override=target_sunday)
-        income = get_income_for_week(target_sunday_override=target_sunday)
+        shifts = get_shifts_for_week(target_sunday_override=target_sunday, cutoff_date=cutoff_date)
+        income = get_income_for_week(target_sunday_override=target_sunday, cutoff_date=cutoff_date)
 
         if is_cross:
             # Cross-month week: write to TWO files
@@ -142,21 +141,35 @@ def health():
 @app.route('/trigger-preliminary', methods=['GET', 'POST'])
 def trigger_preliminary():
     """
-    Trigger a preliminary run up to today.
-    Pulls shifts from the start of the current week up to now (Ireland time).
-    Useful for getting end-of-month data before the week ends.
+    Trigger a preliminary run up to today (Ireland time).
+    Uses the current week's Sunday for correct column detection,
+    but only fetches shifts from Monday up to today.
     """
     if not _auth(request):
         return jsonify({'error': 'unauthorized'}), 401
 
-    # Calculate: Monday of the current week (Ireland time) to yesterday (or today)
-    from square_service import IRELAND_TZ
-    now_ireland = datetime.now(pytz.timezone('Europe/Dublin'))
-    # Use yesterday as the "Sunday" so we pull Mon→yesterday
-    target_sunday = now_ireland.date() - timedelta(days=1)
-    log.info(f"Preliminary trigger: pulling week up to {target_sunday} (Ireland)")
-    run_wages(target_sunday_override=target_sunday, end_of_month_preliminary=True)
-    return jsonify({'status': 'triggered', 'up_to': str(target_sunday), 'at': datetime.now(MELBOURNE_TZ).isoformat()})
+    ireland_tz  = pytz.timezone('Europe/Dublin')
+    today_ie    = datetime.now(ireland_tz).date()
+    dow         = today_ie.weekday()          # Mon=0
+    week_monday = today_ie - timedelta(days=dow)
+    week_sunday = week_monday + timedelta(days=6)
+
+    log.info(f"Preliminary trigger: week {week_monday} to {week_sunday}, "
+             f"fetching up to today {today_ie} (Ireland)")
+
+    # Pass week_sunday as target so the correct column is found in the file,
+    # but pass cutoff_date=today so Square only returns shifts up to now.
+    run_wages(
+        target_sunday_override=week_sunday,
+        end_of_month_preliminary=True,
+        cutoff_date=today_ie,
+    )
+    return jsonify({
+        'status':   'triggered',
+        'week':     f"{week_monday} to {week_sunday}",
+        'up_to':    str(today_ie),
+        'at':       datetime.now(MELBOURNE_TZ).isoformat(),
+    })
 
 
 @app.route('/trigger', methods=['GET', 'POST'])
