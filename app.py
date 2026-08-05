@@ -55,7 +55,7 @@ def get_current_monthly_file(target_sunday=None) -> Path | None:
 
 # ── Main wages job ─────────────────────────────────────────────────────────────
 
-def run_wages(target_sunday_override=None):
+def run_wages(target_sunday_override=None, end_of_month_preliminary=False):
     log.info("=== Weekly wages run started ===")
 
     try:
@@ -64,6 +64,8 @@ def run_wages(target_sunday_override=None):
         week_saturday = week_monday + timedelta(days=5)
         is_cross      = week_saturday.month != week_monday.month
 
+        if end_of_month_preliminary:
+            log.info(f"End-of-month preliminary run for {week_monday} to {target_sunday}")
         log.info(f"Processing week {week_monday} to {target_sunday} "
                  f"({'cross-month' if is_cross else 'single-month'})")
 
@@ -106,7 +108,8 @@ def run_wages(target_sunday_override=None):
             send_wages_email_cross_month(
                 str(prev_file), str(curr_file),
                 result_prev, result_curr,
-                target_sunday
+                target_sunday,
+                preliminary=end_of_month_preliminary
             )
         else:
             # Normal single-month week
@@ -114,7 +117,7 @@ def run_wages(target_sunday_override=None):
             if not file_path:
                 return
             result = update_excel_wages(str(file_path), shifts, income, target_sunday)
-            send_wages_email(str(file_path), result, target_sunday)
+            send_wages_email(str(file_path), result, target_sunday, preliminary=end_of_month_preliminary)
 
         log.info("=== Weekly wages run complete ===")
 
@@ -133,6 +136,26 @@ def health():
         'current_file':    f.name if f else None,
         'server_time':     datetime.now(MELBOURNE_TZ).isoformat(),
     })
+
+
+@app.route('/trigger-preliminary', methods=['GET', 'POST'])
+def trigger_preliminary():
+    """
+    Trigger a preliminary run up to today.
+    Pulls shifts from the start of the current week up to now (Ireland time).
+    Useful for getting end-of-month data before the week ends.
+    """
+    if not _auth(request):
+        return jsonify({'error': 'unauthorized'}), 401
+
+    # Calculate: Monday of the current week (Ireland time) to yesterday (or today)
+    from square_service import IRELAND_TZ
+    now_ireland = datetime.now(pytz.timezone('Europe/Dublin'))
+    # Use yesterday as the "Sunday" so we pull Mon→yesterday
+    target_sunday = now_ireland.date() - timedelta(days=1)
+    log.info(f"Preliminary trigger: pulling week up to {target_sunday} (Ireland)")
+    run_wages(target_sunday_override=target_sunday, end_of_month_preliminary=True)
+    return jsonify({'status': 'triggered', 'up_to': str(target_sunday), 'at': datetime.now(MELBOURNE_TZ).isoformat()})
 
 
 @app.route('/trigger', methods=['GET', 'POST'])
@@ -219,13 +242,25 @@ def list_files():
 # ── Scheduler ──────────────────────────────────────────────────────────────────
 
 scheduler = BackgroundScheduler(timezone=MELBOURNE_TZ)
+
+# Weekly run — every Monday 8am Melbourne time
 scheduler.add_job(
     run_wages,
     CronTrigger(day_of_week='mon', hour=8, minute=0, timezone=MELBOURNE_TZ),
     id='weekly_wages', replace_existing=True,
 )
+
+# End-of-month run — 1st of every month at 8am Melbourne time
+# By then it's ~10-11pm the previous night in Ireland so almost all
+# last-day shifts are clocked out. Email is flagged as preliminary.
+scheduler.add_job(
+    lambda: run_wages(end_of_month_preliminary=True),
+    CronTrigger(day=1, hour=8, minute=0, timezone=MELBOURNE_TZ),
+    id='end_of_month_wages', replace_existing=True,
+)
+
 scheduler.start()
-log.info("Scheduler running — wages job fires Monday 08:00 Melbourne time")
+log.info("Scheduler running — wages: Mon 08:00 + 1st of month 08:00 Melbourne time")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False)
