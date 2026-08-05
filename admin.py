@@ -20,6 +20,10 @@ ADMIN_PASSWORD  = os.getenv('API_KEY', 'changeme')
 ACTIVE_SHEETS   = ['Blanchardstown', 'Cork', 'Nutgrove']
 ALL_SHEETS      = ['Blanchardstown', 'Cork', 'Liffey Valley', 'Nutgrove', 'Whitewater']
 
+MONTH_NAMES = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+               'July', 'August', 'September', 'October', 'November', 'December']
+MONTH_TO_NUM = {m[:3]: i for i, m in enumerate(MONTH_NAMES) if m}
+
 COL_NAME        = 3   # C
 COL_RATE_MON    = 4   # D
 COL_RATE_SUN    = 5   # E
@@ -50,8 +54,15 @@ def login_required(f):
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
 
+def _file_date_key(f):
+    """Sort by actual year+month, not alphabetically."""
+    parts = f.stem.split('_')
+    month_num = MONTH_TO_NUM.get(parts[2], 0) if len(parts) > 2 else 0
+    year      = int(parts[3]) if len(parts) > 3 else 0
+    return (year, month_num)
+
 def get_current_file():
-    files = sorted(DATA_DIR.glob('MB_Ireland_*.xlsx'), reverse=True)
+    files = sorted(DATA_DIR.glob('MB_Ireland_*.xlsx'), key=_file_date_key, reverse=True)
     return files[0] if files else None
 
 
