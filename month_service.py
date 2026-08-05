@@ -124,11 +124,21 @@ def _refresh_location_sheet(ws, year: int, month: int):
         ws.cell(row=PERIOD_ROW, column=col).value = label
         ws.cell(row=DATE_ROW,   column=col).value = val
 
+    # Clear weekly data columns F-P
     for row in range(STAFF_ROW_START, STAFF_ROW_END + 1):
         for col in range(DATA_COL_START, DATA_COL_END + 1):
             cell = ws.cell(row=row, column=col)
             if not isinstance(cell.value, str):
                 cell.value = None
+
+    # Also clear summary columns R-X (18-24) — these are now hard values written
+    # by the script, NOT formulas, so they must be zeroed each new month or they
+    # carry over from whatever file was used as the master template.
+    for row in range(STAFF_ROW_START, STAFF_ROW_END + 1):
+        for col in range(18, 25):   # R(18) S(19) T(20) U(21) V(22) W(23) X(24)
+            cell = ws.cell(row=row, column=col)
+            if not isinstance(cell.value, str):  # don't wipe formula strings
+                cell.value = 0
 
     log.info(f"[{ws.title}] Refreshed for {MONTH_NAMES[month]} {year} ({len(cols)} cols)")
 
