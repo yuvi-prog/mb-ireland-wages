@@ -133,7 +133,20 @@ def get_shifts_for_week(target_sunday_override=None) -> dict:
                 continue
 
             used_shifts += 1
-            hours = (shift_end - shift_start).total_seconds() / 3600
+            gross_hours = (shift_end - shift_start).total_seconds() / 3600
+
+            # Deduct unpaid breaks
+            unpaid_break_hours = 0.0
+            for brk in shift.get('breaks', []):
+                if not brk.get('is_paid', True):
+                    b_start = brk.get('start_at')
+                    b_end   = brk.get('end_at')
+                    if b_start and b_end:
+                        brk_start = datetime.fromisoformat(b_start).astimezone(IRELAND_TZ)
+                        brk_end   = datetime.fromisoformat(b_end).astimezone(IRELAND_TZ)
+                        unpaid_break_hours += (brk_end - brk_start).total_seconds() / 3600
+
+            hours = gross_hours - unpaid_break_hours
 
             member_id = shift.get('team_member_id', '')
             if member_id not in name_cache:
