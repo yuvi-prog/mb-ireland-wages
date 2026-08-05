@@ -24,7 +24,8 @@ def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
         target_sunday = get_previous_week_sunday()
 
     week_start = target_sunday - timedelta(days=6)
-    subject    = f"MB Ireland Wages — {week_start.strftime('%d %b')} to {target_sunday.strftime('%d %b %Y')}"
+    prelim_tag = " ⚠ PRELIMINARY — last-day shifts may be incomplete" if preliminary else ""
+    subject    = f"MB Ireland Wages — {week_start.strftime('%d %b')} to {target_sunday.strftime('%d %b %Y')}{prelim_tag}"
 
     rows = []
     for location, data in summary.items():
@@ -82,6 +83,7 @@ def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
       <p style="color:#495057">
         <strong>Week:</strong> {week_start.strftime('%d %b %Y')} – {target_sunday.strftime('%d %b %Y')}
       </p>
+      {"<p style='background:#2d2000;border:1px solid #7a5000;border-radius:6px;padding:10px 14px;color:#fbbf24;font-size:13px;margin-bottom:12px'>⚠ <strong>Preliminary run</strong> — this fired at 8am Melbourne time on the 1st. Ireland was still in their last evening so a few late shifts may be missing. Check Square and top up manually if needed.</p>" if preliminary else ""}
       <p>The file is attached. Check for any unmatched staff, add bonuses or adjustments (columns V, W), then process payments.</p>
 
       <table style="width:100%;border-collapse:collapse;margin-top:16px">
@@ -132,6 +134,7 @@ def send_wages_email_cross_month(
     prev_file: str, curr_file: str,
     result_prev: dict, result_curr: dict,
     target_sunday,
+    preliminary=False,
 ):
     """Send wages email with TWO attachments when a week crosses a month boundary."""
     import base64, calendar
