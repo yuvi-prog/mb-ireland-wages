@@ -482,6 +482,7 @@ def admin_sheet():
     </div>
     <div style="display:flex;gap:10px">
       <button class="btn btn-secondary" onclick="triggerRun()">▶ Run wages now</button>
+      <button class="btn" style="background:#2d2000;border:1px solid #7a5000;color:#fbbf24" onclick="triggerPreliminary()">⚠ Preliminary run</button>
       <a href="/download?key={ADMIN_PASSWORD}" class="btn btn-secondary">↓ Download</a>
     </div>
   </div>
