@@ -506,6 +506,12 @@ def admin_sheet():
 </div>
 {TOAST_JS}
 <script>
+async function triggerPreliminary(){{
+  if(!confirm('This pulls shifts up to today and sends a PRELIMINARY email. Useful for end-of-month figures before the week ends. Continue?')) return;
+  toast('Running preliminary wages...', false);
+  await fetch('/trigger-preliminary?key={ADMIN_PASSWORD}', {{method:'POST'}});
+  toast('Preliminary email sent — check inbox', false);
+}}
 async function triggerRun(){{
   toast('Running wages...', false);
   await fetch('/trigger?key={ADMIN_PASSWORD}', {{method:'POST'}});
