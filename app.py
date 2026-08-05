@@ -14,11 +14,12 @@ from email_service import send_wages_email, send_wages_email_cross_month
 from month_service import (
     refresh_for_month, monthly_filename, MONTH_NAMES
 )
-
+from admin import admin_bp
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s — %(message)s')
 log = logging.getLogger(__name__)
 
 app          = Flask(__name__)
+app.register_blueprint(admin_bp)
 DATA_DIR     = Path(os.getenv('DATA_DIR', '/data'))
 API_KEY      = os.getenv('API_KEY', 'changeme')
 MELBOURNE_TZ = pytz.timezone('Australia/Melbourne')
