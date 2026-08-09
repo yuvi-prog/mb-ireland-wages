@@ -9,7 +9,7 @@ import requests
 log = logging.getLogger(__name__)
 
 
-def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
+def send_wages_email(file_path: str, summary: dict, target_sunday: date = None, preliminary=False):
     """Email the updated wages file with a run summary."""
     api_key    = os.getenv('SENDGRID_API_KEY')
     to_emails  = [e.strip() for e in os.getenv('EMAIL_TO', 'yuvi@memoryblock.com.au').split(',')]
