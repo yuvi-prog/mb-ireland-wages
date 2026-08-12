@@ -2,6 +2,7 @@ import os
 import logging
 from datetime import datetime, date, timedelta
 from pathlib import Path
+from admin import admin_bp
 
 import pytz
 from flask import Flask, request, jsonify, send_file
@@ -19,6 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name
 log = logging.getLogger(__name__)
 
 app          = Flask(__name__)
+app.register_blueprint(admin_bp)
 DATA_DIR     = Path(os.getenv('DATA_DIR', '/data'))
 API_KEY      = os.getenv('API_KEY', 'changeme')
 MELBOURNE_TZ = pytz.timezone('Australia/Melbourne')
