@@ -51,7 +51,7 @@ def _send_email(to_emails: list, subject: str, html_body: str, attachments: list
 
 
 
-def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
+def send_wages_email(file_path: str, summary: dict, target_sunday: date = None, preliminary: bool = False):
     """Email the updated wages file with a run summary."""
     to_emails  = [e.strip() for e in os.getenv('EMAIL_TO', 'yuvi@memoryblock.com.au').split(',')]
 
