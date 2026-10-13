@@ -140,11 +140,9 @@ def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
     """
 
     with open(file_path, 'rb') as f:
-        file_data = base64.b64encode(f.read()).decode()
+        file_bytes = f.read()
 
-    payload = {
-        "personalizations": [{"to": [{"email": e} for e in to_emails]}],
-
+    _send_email(to_emails, subject, html_body, [(Path(file_path).name, file_bytes)])
 
 
 def send_wages_email_cross_month(
