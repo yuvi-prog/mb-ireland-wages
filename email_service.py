@@ -1,52 +1,50 @@
 import os
 import base64
 import logging
-import smtplib
+import requests
 from datetime import date, timedelta
 from pathlib import Path
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
 
 log = logging.getLogger(__name__)
 
 
 def _send_email(to_emails: list, subject: str, html_body: str, attachments: list):
     """
-    Send an HTML email with optional attachments via Gmail SMTP.
+    Send an HTML email with optional attachments via SendGrid.
     attachments: list of (filename, bytes_data)
     """
-    gmail_user = os.getenv('GMAIL_USER')
-    gmail_pass = os.getenv('GMAIL_APP_PASSWORD')
+    api_key = os.getenv('SENDGRID_API_KEY')
+    from_email = os.getenv('EMAIL_FROM', 'wages@memoryblock.com.au')
 
-    if not gmail_user or not gmail_pass:
-        log.warning("GMAIL_USER or GMAIL_APP_PASSWORD not set — skipping email")
+    if not api_key:
+        log.warning("SENDGRID_API_KEY not set — skipping email")
         return False
 
-    msg = MIMEMultipart('mixed')
-    msg['From']    = f"MB Ireland Wages <{gmail_user}>"
-    msg['To']      = ', '.join(to_emails)
-    msg['Subject'] = subject
+    payload = {
+        "personalizations": [{"to": [{"email": e} for e in to_emails]}],
+        "from": {"email": from_email, "name": "MB Ireland Wages"},
+        "subject": subject,
+        "content": [{"type": "text/html", "value": html_body}],
+        "attachments": [
+            {
+                "content": base64.b64encode(file_bytes).decode(),
+                "type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "filename": filename,
+            }
+            for filename, file_bytes in attachments
+        ],
+    }
 
-    msg.attach(MIMEText(html_body, 'html'))
-
-    for filename, file_bytes in attachments:
-        part = MIMEBase('application',
-                        'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        part.set_payload(file_bytes)
-        encoders.encode_base64(part)
-        part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
-        msg.attach(part)
-
-    try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(gmail_user, gmail_pass)
-            server.sendmail(gmail_user, to_emails, msg.as_string())
+    r = requests.post(
+        'https://api.sendgrid.com/v3/mail/send',
+        json=payload,
+        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+    )
+    if r.status_code == 202:
         log.info(f"Email sent to {', '.join(to_emails)}")
         return True
-    except Exception as e:
-        log.error(f"Failed to send email: {e}")
+    else:
+        log.error(f"SendGrid error {r.status_code}: {r.text}")
         return False
 
 
