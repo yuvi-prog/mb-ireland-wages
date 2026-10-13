@@ -1,23 +1,59 @@
 import os
 import base64
 import logging
+import smtplib
 from datetime import date, timedelta
 from pathlib import Path
-
-import requests
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 
 log = logging.getLogger(__name__)
 
 
-def send_wages_email(file_path: str, summary: dict, target_sunday: date = None, preliminary=False):
-    """Email the updated wages file with a run summary."""
-    api_key    = os.getenv('SENDGRID_API_KEY')
-    to_emails  = [e.strip() for e in os.getenv('EMAIL_TO', 'yuvi@memoryblock.com.au').split(',')]
-    from_email = os.getenv('EMAIL_FROM', 'wages@memoryblock.com.au')
+def _send_email(to_emails: list, subject: str, html_body: str, attachments: list):
+    """
+    Send an HTML email with optional attachments via Gmail SMTP.
+    attachments: list of (filename, bytes_data)
+    """
+    gmail_user = os.getenv('GMAIL_USER')
+    gmail_pass = os.getenv('GMAIL_APP_PASSWORD')
 
-    if not api_key:
-        log.warning("SENDGRID_API_KEY not set — skipping email")
-        return
+    if not gmail_user or not gmail_pass:
+        log.warning("GMAIL_USER or GMAIL_APP_PASSWORD not set — skipping email")
+        return False
+
+    msg = MIMEMultipart('mixed')
+    msg['From']    = f"MB Ireland Wages <{gmail_user}>"
+    msg['To']      = ', '.join(to_emails)
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(html_body, 'html'))
+
+    for filename, file_bytes in attachments:
+        part = MIMEBase('application',
+                        'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        part.set_payload(file_bytes)
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+        msg.attach(part)
+
+    try:
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(gmail_user, gmail_pass)
+            server.sendmail(gmail_user, to_emails, msg.as_string())
+        log.info(f"Email sent to {', '.join(to_emails)}")
+        return True
+    except Exception as e:
+        log.error(f"Failed to send email: {e}")
+        return False
+
+
+
+def send_wages_email(file_path: str, summary: dict, target_sunday: date = None):
+    """Email the updated wages file with a run summary."""
+    to_emails  = [e.strip() for e in os.getenv('EMAIL_TO', 'yuvi@memoryblock.com.au').split(',')]
 
     if target_sunday is None:
         from square_service import get_previous_week_sunday
@@ -108,26 +144,7 @@ def send_wages_email(file_path: str, summary: dict, target_sunday: date = None, 
 
     payload = {
         "personalizations": [{"to": [{"email": e} for e in to_emails]}],
-        "from": {"email": from_email, "name": "MB Ireland Wages"},
-        "subject": subject,
-        "content": [{"type": "text/html", "value": html_body}],
-        "attachments": [{
-            "content":  file_data,
-            "type":     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "filename": Path(file_path).name,
-        }],
-    }
 
-    r = requests.post(
-        'https://api.sendgrid.com/v3/mail/send',
-        json=payload,
-        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
-    )
-
-    if r.status_code == 202:
-        log.info(f"Wages email sent to {', '.join(to_emails)}")
-    else:
-        log.error(f"SendGrid error {r.status_code}: {r.text}")
 
 
 def send_wages_email_cross_month(
@@ -141,13 +158,7 @@ def send_wages_email_cross_month(
     from datetime import timedelta
     from pathlib import Path
 
-    api_key    = os.getenv('SENDGRID_API_KEY')
     to_emails  = [e.strip() for e in os.getenv('EMAIL_TO', 'yuvi@memoryblock.com.au').split(',')]
-    from_email = os.getenv('EMAIL_FROM', 'wages@memoryblock.com.au')
-
-    if not api_key:
-        log.warning("SENDGRID_API_KEY not set — skipping email")
-        return
 
     week_sunday = target_sunday
     week_monday = week_sunday - timedelta(days=6)
@@ -228,26 +239,6 @@ def send_wages_email_cross_month(
     attachments = []
     for fp in [prev_file, curr_file]:
         with open(fp, 'rb') as f:
-            attachments.append({
-                "content":  base64.b64encode(f.read()).decode(),
-                "type":     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "filename": Path(fp).name,
-            })
+            attachments.append((Path(fp).name, f.read()))
 
-    payload = {
-        "personalizations": [{"to": [{"email": e} for e in to_emails]}],
-        "from": {"email": from_email, "name": "MB Ireland Wages"},
-        "subject": subject,
-        "content": [{"type": "text/html", "value": html_body}],
-        "attachments": attachments,
-    }
-
-    r = requests.post(
-        'https://api.sendgrid.com/v3/mail/send',
-        json=payload,
-        headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
-    )
-    if r.status_code == 202:
-        log.info(f"Cross-month wages email sent to {', '.join(to_emails)}")
-    else:
-        log.error(f"SendGrid error {r.status_code}: {r.text}")
+    _send_email(to_emails, subject, html_body, attachments)
