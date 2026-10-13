@@ -12,7 +12,7 @@ from email import encoders
 log = logging.getLogger(__name__)
 
 
-def send_wages_email(file_path: str, summary: dict, target_sunday=None, preliminary=False):
+def _send_email(to_emails: list, subject: str, html_body: str, attachments: list):
     """
     Send an HTML email with optional attachments via Gmail SMTP.
     attachments: list of (filename, bytes_data)
