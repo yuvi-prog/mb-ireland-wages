@@ -2,7 +2,6 @@ import os
 import logging
 from datetime import datetime, date, timedelta
 from pathlib import Path
-from admin import admin_bp
 
 import pytz
 from flask import Flask, request, jsonify, send_file
@@ -20,7 +19,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name
 log = logging.getLogger(__name__)
 
 app          = Flask(__name__)
-app.register_blueprint(admin_bp)
 DATA_DIR     = Path(os.getenv('DATA_DIR', '/data'))
 API_KEY      = os.getenv('API_KEY', 'changeme')
 MELBOURNE_TZ = pytz.timezone('Australia/Melbourne')
@@ -110,8 +108,7 @@ def run_wages(target_sunday_override=None, end_of_month_preliminary=False, cutof
             send_wages_email_cross_month(
                 str(prev_file), str(curr_file),
                 result_prev, result_curr,
-                target_sunday,
-                preliminary=end_of_month_preliminary
+                target_sunday
             )
         else:
             # Normal single-month week
@@ -119,7 +116,7 @@ def run_wages(target_sunday_override=None, end_of_month_preliminary=False, cutof
             if not file_path:
                 return
             result = update_excel_wages(str(file_path), shifts, income, target_sunday)
-            send_wages_email(str(file_path), result, target_sunday, preliminary=end_of_month_preliminary)
+            send_wages_email(str(file_path), result, target_sunday)
 
         log.info("=== Weekly wages run complete ===")
 
