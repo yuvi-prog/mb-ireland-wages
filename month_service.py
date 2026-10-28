@@ -83,10 +83,16 @@ def generate_week_columns(year: int, month: int) -> list:
         p_end   = first_day + timedelta(days=(5 - dow))   # Saturday of that week
         sunday  = p_end + timedelta(days=1)                # Sunday of that week
 
-    cols = [
-        (_dow_label(p_start, p_end), _range_label(p_start, p_end), 'weekday'),
-        ('Sun', datetime(sunday.year, sunday.month, sunday.day), 'sunday'),
-    ]
+    if dow == 6:
+        # Month starts on a Sunday. That Sunday is the last column of the previous
+        # month's final week (already in that file), so this month starts on Monday the 2nd.
+        sunday = first_day
+        cols = []
+    else:
+        cols = [
+            (_dow_label(p_start, p_end), _range_label(p_start, p_end), 'weekday'),
+            ('Sun', datetime(sunday.year, sunday.month, sunday.day), 'sunday'),
+        ]
 
     current_monday = sunday + timedelta(days=1)
 
