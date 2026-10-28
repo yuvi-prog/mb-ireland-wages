@@ -270,7 +270,7 @@ def get_income_for_week(target_sunday_override=None, cutoff_date=None) -> dict:
         cross_start    = last_of_month + timedelta(days=1)
         cross_end      = min(week_saturday, effective_end)
     else:
-        primary_end = week_saturday
+        primary_end = min(week_saturday, effective_end)
         cross_start = cross_end = None
 
     results = {}
@@ -282,7 +282,7 @@ def get_income_for_week(target_sunday_override=None, cutoff_date=None) -> dict:
 
         income_primary = _fetch_income_for_period(location_id, week_monday, primary_end)
 
-        if cross_month and cross_start:
+        if cross_month and cross_start and cross_start <= cross_end:
             income_cross = _fetch_income_for_period(location_id, cross_start, cross_end)
         else:
             income_cross = 0.0
