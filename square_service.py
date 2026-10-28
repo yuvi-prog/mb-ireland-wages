@@ -28,6 +28,31 @@ def _headers():
     }
 
 
+def _request_with_retry(method: str, url: str, retries: int = 4, **kwargs):
+    """
+    Call the Square API, retrying on 5xx errors and network failures
+    with a growing wait (2s, 4s, 8s). Logs Square's error body on failure.
+    """
+    import time
+    kwargs.setdefault('headers', _headers())
+    kwargs.setdefault('timeout', 60)
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.request(method, url, **kwargs)
+            if r.status_code < 500:
+                r.raise_for_status()
+                return r
+            log.warning(f"Square {r.status_code} on {url} (attempt {attempt}/{retries}): {r.text[:300]}")
+            last_exc = requests.HTTPError(f"{r.status_code} Server Error for url: {url}", response=r)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            log.warning(f"Square network error on {url} (attempt {attempt}/{retries}): {e}")
+            last_exc = e
+        if attempt < retries:
+            time.sleep(2 ** attempt)
+    raise last_exc
+
+
 def get_previous_week_sunday() -> date:
     today = datetime.now(MELBOURNE_TZ).date()
     return today - timedelta(days=1)
@@ -111,9 +136,7 @@ def get_shifts_for_week(target_sunday_override=None, cutoff_date=None) -> dict:
         if cursor:
             body['cursor'] = cursor
 
-        r = requests.post(f'{SQUARE_BASE}/labor/shifts/search',
-                          headers=_headers(), json=body)
-        r.raise_for_status()
+        r = _request_with_retry('POST', f'{SQUARE_BASE}/labor/shifts/search', json=body)
         data = r.json()
 
         for shift in data.get('shifts', []):
@@ -202,8 +225,7 @@ def _fetch_income_for_period(location_id: str, period_start: date, period_end: d
         if cursor:
             params['cursor'] = cursor
 
-        r = requests.get(f'{SQUARE_BASE}/payments', headers=_headers(), params=params)
-        r.raise_for_status()
+        r = _request_with_retry('GET', f'{SQUARE_BASE}/payments', params=params)
         data = r.json()
 
         for payment in data.get('payments', []):
