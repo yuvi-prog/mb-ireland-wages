@@ -494,6 +494,7 @@ def admin_sheet():
     <div style="display:flex;gap:10px">
       <button class="btn btn-secondary" onclick="triggerRun()">▶ Run wages now</button>
       <button class="btn" style="background:#2d2000;border:1px solid #7a5000;color:#fbbf24" onclick="triggerPreliminary()">⚠ Preliminary run</button>
+      <button class="btn btn-primary" onclick="triggerCatchUp()" title="Rebuild every week from the start of this month up to today">⟳ Catch up to today</button>
       <a href="/download?key={ADMIN_PASSWORD}" class="btn btn-secondary">↓ Download</a>
     </div>
   </div>
@@ -506,6 +507,17 @@ def admin_sheet():
 </div>
 {TOAST_JS}
 <script>
+async function triggerCatchUp(){{
+  if(!confirm('This rebuilds every week from the start of this month up to today and emails the refreshed file. It takes 1-3 minutes. Continue?')) return;
+  toast('Catch-up started...', false);
+  const r = await fetch('/catch-up?key={ADMIN_PASSWORD}', {{method:'POST'}});
+  const d = await r.json();
+  if(d.status === 'started') {{
+    toast('Rebuilding ' + d.weeks.length + ' weeks. Email arrives in 1-3 minutes.', false);
+  }} else {{
+    toast('Error: ' + (d.error || 'could not start'), true);
+  }}
+}}
 async function triggerPreliminary(){{
   if(!confirm('This pulls shifts up to today and sends a PRELIMINARY email. Useful for end-of-month figures before the week ends. Continue?')) return;
   toast('Running preliminary wages...', false);
