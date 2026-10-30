@@ -213,6 +213,7 @@ def _fetch_income_for_period(location_id: str, period_start: date, period_end: d
     start_at, end_at = _week_utc_bounds(period_start, period_end)
     total_collected    = 0.0
     gift_card_redeemed = 0.0
+    skipped            = {}
     cursor = None
 
     while True:
@@ -229,6 +230,11 @@ def _fetch_income_for_period(location_id: str, period_start: date, period_end: d
         data = r.json()
 
         for payment in data.get('payments', []):
+            # Square's payment list also returns CANCELED and FAILED payments.
+            # No money was collected on those, so they must not count as income.
+            if payment.get('status') != 'COMPLETED':
+                skipped[payment.get('status', 'UNKNOWN')] = skipped.get(payment.get('status', 'UNKNOWN'), 0) + 1
+                continue
             amount = payment.get('total_money', {}).get('amount', 0) / 100
             total_collected += amount
             if payment.get('source_type') == 'SQUARE_GIFT_CARD':
@@ -238,6 +244,8 @@ def _fetch_income_for_period(location_id: str, period_start: date, period_end: d
         if not cursor:
             break
 
+    if skipped:
+        log.info(f"Income {period_start} to {period_end}: ignored non-completed payments {skipped}")
     return round(total_collected - gift_card_redeemed, 2)
 
 
@@ -262,15 +270,17 @@ def get_income_for_week(target_sunday_override=None, cutoff_date=None) -> dict:
     week_saturday = week_monday + timedelta(days=5)
     cross_month   = week_saturday.month != week_monday.month
 
+    # The income cell sits in the Mon-Sat column but represents the whole payroll week,
+    # so Sunday's takings are included (Sunday has no income cell of its own).
     if cross_month:
         import calendar
         last_of_month  = date(week_monday.year, week_monday.month,
                               calendar.monthrange(week_monday.year, week_monday.month)[1])
         primary_end    = min(last_of_month, effective_end)
         cross_start    = last_of_month + timedelta(days=1)
-        cross_end      = min(week_saturday, effective_end)
+        cross_end      = min(week_sunday, effective_end)
     else:
-        primary_end = min(week_saturday, effective_end)
+        primary_end = min(week_sunday, effective_end)
         cross_start = cross_end = None
 
     results = {}
